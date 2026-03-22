@@ -8,6 +8,7 @@ import { goCommand } from './commands/go.js';
 import { infoCommand } from './commands/info.js';
 import { removeCommand } from './commands/remove.js';
 import { initCommand } from './commands/init.js';
+import { describeCommand } from './commands/describe.js';
 import { isInsideGitRepo } from './git.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -54,6 +55,15 @@ program
   .command('init')
   .description('Print shell function for directory navigation integration')
   .action(initCommand);
+
+program
+  .command('describe [query]')
+  .description('Generate or show AI-powered repository description')
+  .option('--instructions <text>', 'Additional instructions for the AI')
+  .option('--show', 'Show stored description without regenerating')
+  .option('--business-lines <n>', 'Target line count for business description', '20')
+  .option('--technical-lines <n>', 'Target line count for technical description', '20')
+  .action(describeCommand);
 
 // Default action: no subcommand provided
 program.action(async () => {

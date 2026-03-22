@@ -29,6 +29,55 @@ export interface RegistryEntry {
   currentBranch: string;
   /** ISO 8601 timestamp of last scan */
   lastUpdated: string;
+  /** AI-generated description of the repository (optional, populated by describe command) */
+  description?: RepoDescription;
+}
+
+/**
+ * AI-generated description of a repository.
+ */
+export interface RepoDescription {
+  /** Business-oriented description in markdown format */
+  businessDescription: string;
+  /** Technical description in markdown format */
+  technicalDescription: string;
+  /** ISO 8601 timestamp of when this description was generated */
+  generatedAt: string;
+  /** The AI model identifier used to generate this description */
+  generatedBy: string;
+  /** Custom user instructions used during generation (if any) */
+  instructions?: string;
+}
+
+/**
+ * Identifies which Claude API provider to use.
+ */
+export type AIProvider = 'anthropic' | 'azure' | 'vertex';
+
+/**
+ * Configuration for the AI client.
+ */
+export interface AIConfig {
+  /** Which Claude provider to use */
+  provider: AIProvider;
+  /** Claude model identifier (format varies by provider) */
+  model: string;
+  /** Maximum tokens for the AI response */
+  maxTokens: number;
+  /** Anthropic direct API configuration */
+  anthropic?: {
+    apiKey: string;
+  };
+  /** Azure AI Foundry configuration */
+  azure?: {
+    apiKey: string;
+    resource: string;
+  };
+  /** Google Vertex AI configuration */
+  vertex?: {
+    projectId: string;
+    region: string;
+  };
 }
 
 /**

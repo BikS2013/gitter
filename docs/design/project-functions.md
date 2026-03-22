@@ -163,6 +163,96 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 
 ---
 
+### FR-12: Generate AI Repository Description (describe command)
+
+**Description**: Analyze a registered repository using Claude AI and generate a structured description consisting of two sections: a business description and a technical description. The description is stored in the registry entry and can be refined iteratively.
+
+**Command**: `gitter describe [query]`
+
+**Behavior**:
+- If `[query]` is omitted and CWD is inside a registered git repo, use the current repo.
+- If `[query]` is omitted and CWD is not a registered repo, print error to stderr and exit(1).
+- If `[query]` is provided, search the registry (same logic as `info`/`go`):
+  - 0 matches: stderr error, exit(1)
+  - 1 match: use that entry
+  - N matches: interactive select via stderr
+- Collect repository content (file tree, README, manifest, source files) from the entry's `localPath`.
+- Send collected content to Claude along with the prompt.
+- Parse the AI response and store the description in the registry entry.
+- Display the generated description to the terminal.
+
+**Options**:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--instructions <text>` | string | Additional user instructions to guide the AI (e.g., "focus on the security aspects") |
+| `--show` | flag | Display the stored description without regenerating |
+| `--business-lines <n>` | number | Override the default 20-line target for the business description |
+| `--technical-lines <n>` | number | Override the default 20-line target for the technical description |
+
+**Default Description Structure**:
+- **Business Description** (~20 lines): Purpose, use cases, target audience, value proposition, problem it solves.
+- **Technical Description** (~20 lines): Architecture, technology stack, design patterns, technical differentiators, approach.
+
+**Refinement / Iterative Use**:
+- When a description already exists, it is included in the prompt context as a starting point.
+- User instructions are applied as refinements to the existing description.
+- Each generation fully replaces the stored description (no versioning).
+
+---
+
+### FR-13: Display Stored Description (describe --show)
+
+**Description**: Display the stored AI-generated description for a repository without invoking the AI.
+
+**Command**: `gitter describe [query] --show`
+
+**Behavior**:
+- Resolve the target repository (same logic as FR-12).
+- If the entry has a stored description, render it to the terminal with formatted headers.
+- If the entry has no description, print informational message suggesting the user run `gitter describe` and exit(0).
+
+---
+
+### FR-14: Show Description in info Command
+
+**Description**: Extend the existing `info` command to display the stored AI-generated description (if available) as an additional section at the end of the output.
+
+**Command**: `gitter info <query>` (existing command, extended)
+
+**Behavior**:
+- After existing metadata output, if the entry has a `description` field:
+  - Print a separator line
+  - Print "Business Description:" header followed by the business description text
+  - Print "Technical Description:" header followed by the technical description text
+  - Print "Description Generated:" with the timestamp
+- If no description exists, append: "Description: (none -- run 'gitter describe' to generate)"
+
+---
+
+### FR-15: Claude API Configuration
+
+**Description**: Configuration system for the Claude AI integration supporting multiple providers with priority-based resolution.
+
+**Location**: `~/.gitter/config.json` (same directory as registry.json)
+
+**Configuration Priority** (highest to lowest):
+1. Environment variables (shell-set)
+2. `.env` file in CWD (loaded via dotenv)
+3. `~/.gitter/config.json`
+
+**Supported Providers**:
+
+| Provider | SDK Package | Required Config |
+|----------|------------|-----------------|
+| Anthropic (direct) | `@anthropic-ai/sdk` | `apiKey` |
+| Azure AI Foundry | `@anthropic-ai/foundry-sdk` | `apiKey`, `resource` |
+| Google Vertex AI | `@anthropic-ai/vertex-sdk` | `projectId`, `region` (uses ADC for auth) |
+
+**Required Configuration**: If any required configuration value is not found in any source, the tool must throw a clear error. No fallback or default values are permitted for API credentials or endpoints.
+
+---
+
 ## Feature Summary Table
 
 | Feature | Command | Status |
@@ -179,6 +269,10 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 | Default Scan | `gitter` (no args) | Planned |
 | Shell Function Setup | `gitter init` | Planned |
 | Stale Entry Detection | (in list/go) | Planned |
+| AI Repo Description | `gitter describe [query]` | Planned |
+| Show Stored Description | `gitter describe --show` | Planned |
+| Description in Info | `gitter info` (extended) | Planned |
+| AI Configuration | (internal) | Planned |
 
 ---
 
@@ -190,6 +284,13 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 - GUI or menu-bar integration
 - Remote-only repository tracking (every entry must have a local path)
 - Bulk scan (`gitter scan-all <directory>`) -- deferred to future version
+- AI description versioning/history
+- Streaming AI API responses
+- Dry-run mode for AI content preview
+- Custom AI prompt templates in config
+- Batch description generation across multiple repos
+- AI cost estimation before API call
+- Support for non-Claude AI providers (OpenAI, etc.)
 
 ---
 

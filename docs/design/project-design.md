@@ -1295,3 +1295,1393 @@ Unit A: types.ts (single agent, fast)
 
 **Production dependencies**: 4
 **Dev dependencies**: 3
+
+---
+
+## 10. AI-Powered Repository Description Feature
+
+### 10.1 Feature Overview
+
+The `gitter describe` command uses the Anthropic Claude SDK to analyze a registered git repository's contents and generate structured descriptions. Each description consists of two sections -- a business description (for stakeholders) and a technical description (for developers). Descriptions are stored persistently in the registry and can be displayed on demand or as part of `gitter info`.
+
+The feature supports three Claude API providers: Anthropic (direct), Azure AI Foundry, and Google Vertex AI. Configuration follows a priority-based resolution system (environment variables > `.env` file > `~/.gitter/config.json`) with no fallback values permitted.
+
+**Reference Documents**:
+- Requirements: `docs/reference/refined-request-ai-repo-descriptions.md`
+- Implementation Plan: `docs/design/plan-002-ai-descriptions.md`
+- SDK Investigation: `docs/reference/investigation-ai-integration.md`
+
+---
+
+### 10.2 Updated Component Diagram
+
+```
++------------------------------------------------------------------+
+|                         USER SHELL (zsh/bash)                     |
+|                                                                   |
+|  gitter() {           <-- shell function (installed via init)     |
+|    if "go" -> capture stdout -> cd "$target"                      |
+|    else    -> passthrough to binary                               |
+|  }                                                                |
++---------|--------------------------------------------------------+
+          |
+          v
++------------------------------------------------------------------+
+|                      CLI ENTRY POINT (src/cli.ts)                 |
+|                                                                   |
+|  #!/usr/bin/env node                                              |
+|  Commander program definition                                     |
+|  Default action: is git repo? -> scan : show help                 |
+|                                                                   |
+|  Subcommands:                                                     |
+|    scan | list | search | go | info | remove | init | describe    |
++---------|--------------------------------------------------------+
+          |
+          v
++------------------------------------------------------------------+
+|                   COMMAND HANDLERS (src/commands/*.ts)             |
+|                                                                   |
+|  scan.ts -----> git.collectRepoMetadata() + registry.addOrUpdate()|
+|  list.ts -----> registry.loadRegistry() + cli-table3 formatting   |
+|  search.ts ---> registry.searchEntries() + cli-table3 formatting  |
+|  go.ts -------> registry.searchEntries() + inquirer select        |
+|  info.ts -----> registry.searchEntries() + detailed formatting    |
+|  remove.ts ---> registry.removeByPath() + inquirer confirm        |
+|  init.ts -----> prints shell function to stdout                   |
+|  describe.ts -> ai-config + ai-client + repo-content + registry   |
++--------|-----------------------------|---------------------------+
+         |                             |
+         v                             v
++-------------------------+  +---------------------------+
+|  GIT MODULE             |  |  REGISTRY MODULE          |
+|  (src/git.ts)           |  |  (src/registry.ts)        |
+|                         |  |                           |
+|  git()                  |  |  getRegistryDir()         |
+|  isInsideGitRepo()      |  |  getRegistryPath()        |
+|  getRepoRoot()          |  |  ensureRegistryExists()   |
+|  getRemotes()           |  |  loadRegistry()           |
+|  getLocalBranches()     |  |  saveRegistry()           |
+|  getRemoteBranches()    |  |  findByPath()             |
+|  getCurrentBranch()     |  |  addOrUpdate()            |
+|  collectRepoMetadata()  |  |  removeByPath()           |
+|                         |  |  searchEntries()          |
++--------+----------------+  +------------+--------------+
+         |                               |
+         v                               v
++-------------------------+  +---------------------------+
+|  child_process          |  |  fs (Node.js built-in)    |
+|  (Node.js built-in)     |  |                           |
+|  execFileSync('git'..)  |  |  readFileSync / writeFile |
++-------------------------+  |  renameSync (atomic)      |
+                             |  mkdirSync / existsSync   |
+                             +---------------------------+
+                                         |
+                                         v
+                             +---------------------------+
+                             |  ~/.gitter/registry.json  |
+                             |  ~/.gitter/config.json    |
+                             +---------------------------+
+
++------------------------------------------------------------------+
+|                   AI MODULES (new for describe feature)           |
+|                                                                   |
+|  src/ai-config.ts -----> Config loading with priority resolution  |
+|  src/ai-client.ts -----> Client factory + messages.create wrapper |
+|  src/repo-content.ts --> Repo content collection and formatting   |
++--------|---------------------------------------------------------+
+         |
+         v
++------------------------------------------------------------------+
+|  EXTERNAL SDK PACKAGES                                            |
+|                                                                   |
+|  @anthropic-ai/sdk -----------> Direct Anthropic API              |
+|  @anthropic-ai/foundry-sdk ---> Azure AI Foundry (Claude on Azure)|
+|  @anthropic-ai/vertex-sdk -----> Google Vertex AI                 |
++------------------------------------------------------------------+
+```
+
+---
+
+### 10.3 Data Flow: `gitter describe myproject`
+
+```
+query --> registry.searchEntries()
+            |
+            |--> 0 matches: stderr "No match", exit(1)
+            |--> 1 match: use that entry
+            |--> N matches: inquirer.select() via stderr
+            |
+            v
+          resolve to single RegistryEntry
+            |
+            v
+          Validate: existsSync(entry.localPath)?
+            |--> no: stderr "Repository path no longer exists", exit(1)
+            |
+            v
+          repo-content.collectRepoContent(entry.localPath)
+            |  git ls-tree -r --name-only HEAD (file tree)
+            |  Read README.md (first 200 lines)
+            |  Read package.json / Cargo.toml / etc. (full)
+            |  Read CLAUDE.md, .cursor/rules (first 100 lines each)
+            |  Read src/main.*, src/index.* etc. (first 100 lines each)
+            |  Read .github/workflows/*.yml (first 50 lines each, max 3)
+            |
+            v
+          repo-content.formatRepoContentForPrompt(content)
+            |  Apply token budget (~30K tokens / ~120KB)
+            |  Log content size to stderr
+            |
+            v
+          ai-config.loadAIConfig()
+            |  Priority: env vars > .env > config.json
+            |  Validate required fields per provider
+            |  Throw on missing values (no fallbacks)
+            |
+            v
+          ai-client.createAIClient(config)
+            |  Factory: Anthropic | AnthropicFoundry | AnthropicVertex
+            |
+            v
+          Build system prompt (with line count targets)
+            |
+            v
+          Build user message
+            +--> include existing description if present
+            +--> include user --instructions if provided
+            +--> include formatted repo content
+            |
+            v
+          ai-client.generateDescription(client, config, system, user)
+            |  client.messages.create({ model, max_tokens, system, messages })
+            |  Check stop_reason for truncation warning
+            |
+            v
+          Parse response -> split on "## Technical Description"
+            |  Extract businessDescription (strip heading)
+            |  Extract technicalDescription (strip heading)
+            |
+            v
+          Build RepoDescription object
+            |  { businessDescription, technicalDescription,
+            |    generatedAt: ISO timestamp, generatedBy: model name,
+            |    instructions?: user instructions }
+            |
+            v
+          Update registry entry directly (NOT via addOrUpdate)
+            |  registry = loadRegistry()
+            |  entry.description = description
+            |  saveRegistry(registry)
+            |
+            v
+          Display formatted description to terminal
+```
+
+---
+
+### 10.4 New Type Definitions (additions to `src/types.ts`)
+
+The following types are added to the existing `src/types.ts` module. The `RegistryEntry` interface is extended with an optional `description` field. The registry schema version remains `1` since the new field is optional and fully backward-compatible.
+
+```typescript
+/**
+ * AI-generated description of a repository.
+ * Stored as part of a RegistryEntry in the registry.
+ */
+export interface RepoDescription {
+  /** Business-oriented description in markdown format */
+  businessDescription: string;
+  /** Technical description in markdown format */
+  technicalDescription: string;
+  /** ISO 8601 timestamp of when this description was generated */
+  generatedAt: string;
+  /** The AI model identifier used to generate this description */
+  generatedBy: string;
+  /** Custom user instructions that were used during generation (if any) */
+  instructions?: string;
+}
+
+/**
+ * Identifies which Claude API provider to use.
+ * Each provider requires different configuration and uses a different SDK package.
+ */
+export type AIProvider = 'anthropic' | 'azure' | 'vertex';
+
+/**
+ * Configuration for the AI client.
+ * Loaded from environment variables, .env file, or ~/.gitter/config.json
+ * with priority resolution (env > .env > config file).
+ */
+export interface AIConfig {
+  /** Which Claude provider to use */
+  provider: AIProvider;
+  /** Claude model identifier (format varies by provider) */
+  model: string;
+  /** Maximum tokens for the AI response */
+  maxTokens: number;
+  /** Anthropic direct API configuration */
+  anthropic?: {
+    apiKey: string;
+  };
+  /** Azure AI Foundry configuration */
+  azure?: {
+    apiKey: string;
+    /** Azure resource hostname (e.g., "my-resource.azure.anthropic.com") */
+    resource: string;
+  };
+  /** Google Vertex AI configuration */
+  vertex?: {
+    projectId: string;
+    region: string;
+  };
+}
+```
+
+**Extension to existing `RegistryEntry`**:
+
+```typescript
+export interface RegistryEntry {
+  // ... all existing fields unchanged ...
+
+  /** AI-generated description of the repository (optional, populated by describe command) */
+  description?: RepoDescription;
+}
+```
+
+**Impact on Existing Code**:
+- `loadRegistry()` and `saveRegistry()` require no changes -- they serialize/deserialize the full object graph via `JSON.parse`/`JSON.stringify`.
+- `addOrUpdate()` replaces the full entry by `localPath`. Since `collectRepoMetadata()` does not produce a `description` field, re-scanning would lose the description. This is mitigated in `scan.ts` (see Section 10.10.3).
+- No registry version bump is needed since the field is optional.
+
+---
+
+### 10.5 Module Design: `src/ai-config.ts`
+
+**Purpose**: Load and validate AI configuration with three-tier priority resolution.
+
+#### Configuration Priority (highest to lowest)
+
+1. **Environment variables** -- shell-set vars take highest precedence
+2. **`.env` file in `~/.gitter/`** -- loaded via `dotenv.config({ path })` which does NOT override existing env vars
+3. **`~/.gitter/config.json`** -- JSON config file, lowest priority
+
+#### Environment Variable Mapping
+
+| Config Field | Environment Variable | Config JSON Path | Required When |
+|-------------|---------------------|-----------------|---------------|
+| `provider` | `GITTER_AI_PROVIDER` | `ai.provider` | Always |
+| `model` | `GITTER_AI_MODEL` | `ai.model` | Always |
+| `maxTokens` | `GITTER_AI_MAX_TOKENS` | `ai.maxTokens` | Always |
+| `anthropic.apiKey` | `ANTHROPIC_API_KEY` | `ai.anthropic.apiKey` | provider = anthropic |
+| `azure.apiKey` | `ANTHROPIC_FOUNDRY_API_KEY` | `ai.azure.apiKey` | provider = azure |
+| `azure.resource` | `ANTHROPIC_FOUNDRY_RESOURCE` | `ai.azure.resource` | provider = azure |
+| `vertex.projectId` | `ANTHROPIC_VERTEX_PROJECT_ID` | `ai.vertex.projectId` | provider = vertex |
+| `vertex.region` | `CLOUD_ML_REGION` | `ai.vertex.region` | provider = vertex |
+
+Note: The Azure and Vertex environment variable names are aligned with the SDK defaults so that users who already have these set for other tools get automatic interoperability.
+
+#### Exported Function: `loadAIConfig(): AIConfig`
+
+```typescript
+import dotenv from 'dotenv';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { getRegistryDir } from './registry.js';
+import type { AIConfig, AIProvider } from './types.js';
+
+let configFileCache: Record<string, unknown> | null | undefined = undefined;
+
+/**
+ * Load .env file from ~/.gitter/ directory.
+ * Called once; dotenv does NOT override existing env vars.
+ */
+function loadDotEnv(): void {
+  const envPath = join(getRegistryDir(), '.env');
+  dotenv.config({ path: envPath });
+}
+
+/**
+ * Load and cache the config file from ~/.gitter/config.json.
+ * Returns null if the file does not exist.
+ * Throws if the file is malformed JSON.
+ */
+function loadConfigFile(): Record<string, unknown> | null {
+  if (configFileCache !== undefined) return configFileCache;
+
+  const configPath = join(getRegistryDir(), 'config.json');
+  if (!existsSync(configPath)) {
+    configFileCache = null;
+    return null;
+  }
+
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    configFileCache = JSON.parse(raw) as Record<string, unknown>;
+    return configFileCache;
+  } catch {
+    throw new Error(`Config file is corrupted: ${configPath}`);
+  }
+}
+
+/**
+ * Resolve a configuration value from the priority chain.
+ * Priority: env var (includes .env) > config.json
+ */
+function resolve(envVar: string, configPath: string[]): string | undefined {
+  // Priority 1: Environment variable (already includes .env values via dotenv)
+  const envValue = process.env[envVar];
+  if (envValue !== undefined && envValue !== '') return envValue;
+
+  // Priority 2: Config file
+  const config = loadConfigFile();
+  if (config) {
+    let value: unknown = config;
+    for (const key of configPath) {
+      value = (value as Record<string, unknown>)?.[key];
+    }
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number') return String(value);
+  }
+
+  return undefined;
+}
+
+/**
+ * Throw a standardized error for missing configuration.
+ */
+function throwMissing(envVar: string, configPath: string, description: string): never {
+  throw new Error(
+    `${envVar} is not set. Configure via:\n` +
+    `  - Environment variable: export ${envVar}=<value>\n` +
+    `  - Config file: set "${configPath}" in ~/.gitter/config.json\n` +
+    `  - .env file: add ${envVar}=<value> to ~/.gitter/.env`
+  );
+}
+
+/**
+ * Load and validate AI configuration from environment variables,
+ * .env file (in ~/.gitter/), and ~/.gitter/config.json.
+ *
+ * Throws on any missing required configuration. No fallback values.
+ */
+export function loadAIConfig(): AIConfig {
+  loadDotEnv();
+
+  const provider = resolve('GITTER_AI_PROVIDER', ['ai', 'provider']);
+  if (!provider) {
+    throwMissing('GITTER_AI_PROVIDER', 'ai.provider', 'AI provider');
+  }
+
+  const validProviders: AIProvider[] = ['anthropic', 'azure', 'vertex'];
+  if (!validProviders.includes(provider as AIProvider)) {
+    throw new Error(
+      `Unknown AI provider: '${provider}'. Must be one of: anthropic, azure, vertex`
+    );
+  }
+
+  const model = resolve('GITTER_AI_MODEL', ['ai', 'model']);
+  if (!model) {
+    throwMissing('GITTER_AI_MODEL', 'ai.model', 'AI model');
+  }
+
+  const maxTokensStr = resolve('GITTER_AI_MAX_TOKENS', ['ai', 'maxTokens']);
+  if (!maxTokensStr) {
+    throwMissing('GITTER_AI_MAX_TOKENS', 'ai.maxTokens', 'Max tokens');
+  }
+  const maxTokens = parseInt(maxTokensStr, 10);
+  if (isNaN(maxTokens) || maxTokens <= 0) {
+    throw new Error(
+      `Invalid GITTER_AI_MAX_TOKENS value: '${maxTokensStr}'. Must be a positive integer.`
+    );
+  }
+
+  const config: AIConfig = {
+    provider: provider as AIProvider,
+    model,
+    maxTokens,
+  };
+
+  // Validate and attach provider-specific config
+  switch (config.provider) {
+    case 'anthropic': {
+      const apiKey = resolve('ANTHROPIC_API_KEY', ['ai', 'anthropic', 'apiKey']);
+      if (!apiKey) {
+        throwMissing('ANTHROPIC_API_KEY', 'ai.anthropic.apiKey', 'Anthropic API key');
+      }
+      config.anthropic = { apiKey };
+      break;
+    }
+
+    case 'azure': {
+      const apiKey = resolve('ANTHROPIC_FOUNDRY_API_KEY', ['ai', 'azure', 'apiKey']);
+      if (!apiKey) {
+        throwMissing('ANTHROPIC_FOUNDRY_API_KEY', 'ai.azure.apiKey',
+          'Azure Foundry API key');
+      }
+      const resource = resolve('ANTHROPIC_FOUNDRY_RESOURCE', ['ai', 'azure', 'resource']);
+      if (!resource) {
+        throwMissing('ANTHROPIC_FOUNDRY_RESOURCE', 'ai.azure.resource',
+          'Azure Foundry resource hostname');
+      }
+      config.azure = { apiKey, resource };
+      break;
+    }
+
+    case 'vertex': {
+      const projectId = resolve('ANTHROPIC_VERTEX_PROJECT_ID',
+        ['ai', 'vertex', 'projectId']);
+      if (!projectId) {
+        throwMissing('ANTHROPIC_VERTEX_PROJECT_ID', 'ai.vertex.projectId',
+          'GCP project ID');
+      }
+      const region = resolve('CLOUD_ML_REGION', ['ai', 'vertex', 'region']);
+      if (!region) {
+        throwMissing('CLOUD_ML_REGION', 'ai.vertex.region', 'GCP region');
+      }
+      config.vertex = { projectId, region };
+      break;
+    }
+  }
+
+  return config;
+}
+```
+
+**Key Design Decisions**:
+- The `.env` file is loaded from `~/.gitter/.env`, NOT from CWD. This keeps all gitter configuration in one location.
+- Config file is cached for the duration of the process (read once via `loadConfigFile()`).
+- The `resolve()` helper abstracts the two-tier lookup so each field follows the same pattern.
+- Provider validation happens before provider-specific field resolution, so the error message is clear.
+
+---
+
+### 10.6 Module Design: `src/ai-client.ts`
+
+**Purpose**: Factory function creating the appropriate Claude SDK client based on provider config, plus a wrapper for `messages.create()` with error handling.
+
+#### Imports and Type Definitions
+
+```typescript
+import Anthropic from '@anthropic-ai/sdk';
+import { AnthropicFoundry } from '@anthropic-ai/foundry-sdk';
+import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
+import type { AIConfig } from './types.js';
+
+/**
+ * Union type of all supported Claude client instances.
+ * All share the identical messages.create() API surface.
+ */
+type AIClient = Anthropic | AnthropicFoundry | AnthropicVertex;
+```
+
+#### Exported Function: `createAIClient(config: AIConfig): AIClient`
+
+```typescript
+/**
+ * Factory function that creates the appropriate Claude SDK client
+ * based on the provider specified in the AI configuration.
+ *
+ * @param config - Validated AI configuration (from loadAIConfig)
+ * @returns A client instance with the messages.create() API
+ * @throws Error if provider is unknown
+ */
+export function createAIClient(config: AIConfig): AIClient {
+  switch (config.provider) {
+    case 'anthropic':
+      return new Anthropic({
+        apiKey: config.anthropic!.apiKey,
+      });
+
+    case 'azure':
+      return new AnthropicFoundry({
+        apiKey: config.azure!.apiKey,
+        resource: config.azure!.resource,
+      });
+
+    case 'vertex':
+      return new AnthropicVertex({
+        projectId: config.vertex!.projectId,
+        region: config.vertex!.region,
+      });
+
+    default:
+      throw new Error(`Unknown AI provider: ${config.provider}`);
+  }
+}
+```
+
+The non-null assertions (`!`) are safe because `loadAIConfig()` validates that provider-specific fields are present and throws on missing values before returning.
+
+#### Exported Function: `generateDescription(client, config, systemPrompt, userMessage): Promise<string>`
+
+```typescript
+/**
+ * Call the Claude API to generate a description and return the raw text response.
+ *
+ * @param client - The AI client instance (from createAIClient)
+ * @param config - The AI configuration (for model and maxTokens)
+ * @param systemPrompt - The system prompt instructing the AI
+ * @param userMessage - The user message containing repo content
+ * @returns The raw text response from Claude
+ * @throws Error with user-friendly message on API failures
+ */
+export async function generateDescription(
+  client: AIClient,
+  config: AIConfig,
+  systemPrompt: string,
+  userMessage: string,
+): Promise<string> {
+  try {
+    const response = await client.messages.create({
+      model: config.model,
+      max_tokens: config.maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+
+    // Extract text content from response blocks
+    const textContent = response.content
+      .filter((block: { type: string }) => block.type === 'text')
+      .map((block: { type: string; text: string }) => block.text)
+      .join('\n');
+
+    if (!textContent) {
+      throw new Error('Failed to parse AI response. Please try again.');
+    }
+
+    // Warn if response was truncated
+    if (response.stop_reason === 'max_tokens') {
+      process.stderr.write(
+        'Warning: AI response was truncated due to max_tokens limit. ' +
+        'Consider increasing GITTER_AI_MAX_TOKENS.\n'
+      );
+    }
+
+    return textContent;
+  } catch (error: unknown) {
+    // Re-throw our own errors (e.g., empty response)
+    if (error instanceof Error && error.message.startsWith('Failed to parse')) {
+      throw error;
+    }
+
+    const err = error as { status?: number; message?: string; code?: string };
+
+    if (err.status === 401 || err.status === 403) {
+      throw new Error(
+        'Authentication failed for Claude API. Check your API key/credentials.'
+      );
+    }
+    if (err.status === 429) {
+      throw new Error('Rate limited by Claude API. Please try again later.');
+    }
+    if (err.status === 500 || err.status === 503) {
+      throw new Error('Claude API is temporarily unavailable. Please try again later.');
+    }
+    if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+      throw new Error(`Failed to connect to Claude API: ${err.message}`);
+    }
+
+    throw new Error(`Claude API error: ${err.message ?? 'Unknown error'}`);
+  }
+}
+```
+
+#### System Prompt Design
+
+The system prompt is constructed in the `describe` command handler (Section 10.9) with interpolated line count targets:
+
+```
+You are a technical writer analyzing a software repository. Your task is to produce
+two descriptions of the repository:
+
+1. BUSINESS DESCRIPTION (~{businessLines} lines): Explain the purpose, use cases,
+   target audience, and value proposition of the project. Write for a non-technical
+   stakeholder or decision-maker. Focus on what problem the project solves and why
+   it matters.
+
+2. TECHNICAL DESCRIPTION (~{technicalLines} lines): Explain the architecture,
+   technology stack, design patterns, and technical approach. Write for a developer
+   or technical lead evaluating the project. Focus on how the project works and what
+   makes it technically interesting or sound.
+
+Output format: Use markdown. Start the business description with "## Business Description"
+and the technical description with "## Technical Description". Do not include any other
+top-level headings or preamble.
+```
+
+#### Refinement Prompt Design
+
+When an existing description is present, the user message includes it in a delimited block:
+
+```
+=== EXISTING DESCRIPTION (use as starting point, refine as instructed) ===
+## Business Description
+{existingBusinessDescription}
+
+## Technical Description
+{existingTechnicalDescription}
+=== END EXISTING DESCRIPTION ===
+```
+
+Combined with the `--instructions` option:
+
+```
+=== ADDITIONAL INSTRUCTIONS ===
+{userInstructions}
+=== END ADDITIONAL INSTRUCTIONS ===
+```
+
+This enables iterative refinement: the AI reads both the existing description and the user's instructions, producing an updated version each time.
+
+---
+
+### 10.7 Module Design: `src/repo-content.ts`
+
+**Purpose**: Collect repository content for Claude analysis with token budget management.
+
+#### Exported Interface: `RepoContent`
+
+```typescript
+export interface RepoContent {
+  /** git ls-tree output (truncated at 500 lines) */
+  fileTree: string;
+  /** README content (first 200 lines) or null if no README found */
+  readme: string | null;
+  /** Project manifest (package.json, Cargo.toml, etc.) or null */
+  manifest: string | null;
+  /** Project documentation files (CLAUDE.md, .cursor/rules) -- first 100 lines each */
+  projectDocs: string[];
+  /** Key source file excerpts (src/main.*, src/index.*, etc.) -- first 100 lines each */
+  sourceSnippets: string[];
+  /** CI/CD config excerpts (.github/workflows/*.yml) -- first 50 lines each, max 3 */
+  ciConfigs: string[];
+}
+```
+
+#### Exported Function: `collectRepoContent(repoPath: string): RepoContent`
+
+**Implementation Steps**:
+
+1. **File Tree** (Priority 1 -- Required):
+   - Call `git(['ls-tree', '-r', '--name-only', 'HEAD'], repoPath)` using the existing `git()` function from `src/git.ts`.
+   - Truncate to first 500 lines. If truncated, append: `\n... ({remaining} more files)`.
+   - If the git command fails (e.g., empty repo with no commits), set to `"(no commits yet)"`.
+
+2. **README** (Priority 1 -- Required if exists):
+   - Search for files in order: `README.md`, `README`, `README.rst`, `readme.md`.
+   - Read first 200 lines of the first match found.
+   - If none found, set to `null`.
+
+3. **Manifest** (Priority 1 -- Required if exists):
+   - Search for files in order: `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `pom.xml`, `build.gradle`, `build.gradle.kts`, `composer.json`, `Gemfile`.
+   - Read the full content of the first match found.
+   - If none found, set to `null`.
+
+4. **Project Docs** (Priority 2 -- Optional):
+   - Check for: `CLAUDE.md`, `.cursor/rules`.
+   - Read first 100 lines of each that exists.
+   - Collect into `projectDocs` array (may be empty).
+
+5. **Source Snippets** (Priority 2 -- Optional):
+   - Use the file tree output to find entry point files matching patterns: `src/main.*`, `src/index.*`, `src/app.*`, `src/lib.*`, `main.*`, `index.*`, `app.*`.
+   - Read first 100 lines of each match.
+   - Collect into `sourceSnippets` array (may be empty).
+
+6. **CI Configs** (Priority 3 -- Optional):
+   - Check for `.github/workflows/` directory.
+   - If it exists, list YAML files and read first 50 lines of up to 3 files.
+   - Collect into `ciConfigs` array (may be empty).
+
+#### Internal Helper: `readFileHead()`
+
+```typescript
+import { existsSync, readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+import { git } from './git.js';
+
+function readFileHead(repoPath: string, relativePath: string, maxLines: number): string | null {
+  const fullPath = join(repoPath, relativePath);
+  if (!existsSync(fullPath)) return null;
+  try {
+    const content = readFileSync(fullPath, 'utf-8');
+    const lines = content.split('\n');
+    if (lines.length > maxLines) {
+      return lines.slice(0, maxLines).join('\n') + `\n... (truncated at ${maxLines} lines)`;
+    }
+    return content;
+  } catch {
+    return null; // Silently skip unreadable files (binary, permissions, etc.)
+  }
+}
+```
+
+#### Exported Function: `formatRepoContentForPrompt(content: RepoContent): string`
+
+```typescript
+/**
+ * Format collected repo content into a single string for the Claude user message.
+ * Each section is delimited with labeled separators.
+ */
+export function formatRepoContentForPrompt(content: RepoContent): string {
+  const sections: string[] = [];
+
+  sections.push('--- FILE TREE ---');
+  sections.push(content.fileTree);
+
+  if (content.readme) {
+    sections.push('\n--- README ---');
+    sections.push(content.readme);
+  }
+
+  if (content.manifest) {
+    sections.push('\n--- PROJECT MANIFEST ---');
+    sections.push(content.manifest);
+  }
+
+  for (const doc of content.projectDocs) {
+    sections.push('\n--- PROJECT DOCUMENTATION ---');
+    sections.push(doc);
+  }
+
+  for (const snippet of content.sourceSnippets) {
+    sections.push('\n--- SOURCE FILE ---');
+    sections.push(snippet);
+  }
+
+  for (const ci of content.ciConfigs) {
+    sections.push('\n--- CI/CD CONFIG ---');
+    sections.push(ci);
+  }
+
+  return sections.join('\n');
+}
+```
+
+#### Token Budget Management
+
+**Target**: Total prompt content under ~30,000 tokens (~120KB of text, using the 4 chars/token approximation).
+
+After collecting all content, calculate total byte size of the formatted output. If it exceeds 120,000 bytes, apply progressive truncation:
+
+1. Remove CI configs (Priority 3) until under budget.
+2. Remove source snippets (Priority 2) until under budget.
+3. Remove project docs (Priority 2) until under budget.
+4. Truncate README to 100 lines (instead of 200).
+5. Truncate file tree to 250 lines (instead of 500).
+
+Log to stderr: `"Content size: ~{sizeKB}KB (~{estimatedTokens} tokens)"`.
+
+If content was truncated to fit budget, log warning to stderr: `"Warning: Repository content was truncated to fit within the token budget."`.
+
+```typescript
+const TOKEN_BUDGET_BYTES = 120_000;
+
+/**
+ * Apply progressive truncation to fit content within the token budget.
+ * Modifies the content object in place and reformats.
+ * Returns the formatted string.
+ */
+export function applyTokenBudget(content: RepoContent): string {
+  let formatted = formatRepoContentForPrompt(content);
+  let truncated = false;
+
+  // Step 1: Remove CI configs
+  if (Buffer.byteLength(formatted, 'utf-8') > TOKEN_BUDGET_BYTES && content.ciConfigs.length > 0) {
+    content.ciConfigs = [];
+    formatted = formatRepoContentForPrompt(content);
+    truncated = true;
+  }
+
+  // Step 2: Remove source snippets
+  if (Buffer.byteLength(formatted, 'utf-8') > TOKEN_BUDGET_BYTES && content.sourceSnippets.length > 0) {
+    content.sourceSnippets = [];
+    formatted = formatRepoContentForPrompt(content);
+    truncated = true;
+  }
+
+  // Step 3: Remove project docs
+  if (Buffer.byteLength(formatted, 'utf-8') > TOKEN_BUDGET_BYTES && content.projectDocs.length > 0) {
+    content.projectDocs = [];
+    formatted = formatRepoContentForPrompt(content);
+    truncated = true;
+  }
+
+  // Step 4 & 5: Further truncation of README and file tree if still over budget
+  // (re-read with smaller limits and re-format)
+
+  const sizeKB = Math.round(Buffer.byteLength(formatted, 'utf-8') / 1024);
+  const estimatedTokens = Math.round(Buffer.byteLength(formatted, 'utf-8') / 4);
+  process.stderr.write(`Content size: ~${sizeKB}KB (~${estimatedTokens} tokens)\n`);
+
+  if (truncated) {
+    process.stderr.write('Warning: Repository content was truncated to fit within the token budget.\n');
+  }
+
+  return formatted;
+}
+```
+
+---
+
+### 10.8 Response Parsing
+
+The Claude response is expected to contain two markdown sections. Parsing splits on the `## Technical Description` heading:
+
+```typescript
+/**
+ * Parse the Claude response into business and technical description sections.
+ * Expects the response to contain "## Business Description" and "## Technical Description" headings.
+ *
+ * @param responseText - Raw text response from Claude
+ * @returns Parsed business and technical descriptions (headings stripped)
+ * @throws Error if the "## Technical Description" heading is not found
+ */
+function parseDescription(responseText: string): { business: string; technical: string } {
+  const techIndex = responseText.indexOf('## Technical Description');
+  if (techIndex === -1) {
+    throw new Error(
+      'Failed to parse AI response: missing "## Technical Description" heading'
+    );
+  }
+
+  const businessSection = responseText.substring(0, techIndex).trim();
+  const technicalSection = responseText.substring(techIndex).trim();
+
+  const business = businessSection.replace(/^## Business Description\s*/i, '').trim();
+  const technical = technicalSection.replace(/^## Technical Description\s*/i, '').trim();
+
+  return { business, technical };
+}
+```
+
+---
+
+### 10.9 Module Design: `src/commands/describe.ts`
+
+**Purpose**: The main `gitter describe` command handler.
+
+#### Options Interface
+
+```typescript
+interface DescribeOptions {
+  show?: boolean;
+  instructions?: string;
+  businessLines?: string;   // Commander passes as string
+  technicalLines?: string;  // Commander passes as string
+}
+```
+
+#### Exported Function: `describeCommand(query: string | undefined, options: DescribeOptions): Promise<void>`
+
+**`--show` Path**:
+
+1. Resolve the target repository entry (see "Query Resolution" below).
+2. If entry has `description` field:
+   - Print formatted output with bold headers using `picocolors`:
+     - `"Business Description:"` + content
+     - `"Technical Description:"` + content
+     - `"Description Generated:"` + timestamp
+     - `"Generated By:"` + model name
+     - `"Instructions Used:"` + instructions (if any)
+3. If entry has NO `description` field:
+   - Print: `"No description available for {repoName}. Run 'gitter describe' to generate one."`
+   - Exit(0) -- informational, not an error.
+
+**Generation Path**:
+
+1. Resolve target repository entry.
+2. Validate `existsSync(entry.localPath)`. If not, throw: `"Repository path no longer exists: {localPath}"`.
+3. Call `loadAIConfig()` from `ai-config.ts`.
+4. Call `createAIClient(config)` from `ai-client.ts`.
+5. Call `collectRepoContent(entry.localPath)` from `repo-content.ts`.
+6. Call `applyTokenBudget(content)` to get the formatted, budget-constrained string.
+7. Build system prompt with interpolated `businessLines` and `technicalLines` values.
+8. Build user message containing:
+   - Repository name and path
+   - Existing description (if present in registry)
+   - User instructions (if `--instructions` provided)
+   - Formatted repo content
+9. Print progress to stderr: `"Generating description for {repoName}..."`.
+10. Call `generateDescription(client, config, systemPrompt, userMessage)`.
+11. Parse response via `parseDescription(responseText)`.
+12. Build `RepoDescription` object with parsed content, timestamp, model name, and instructions.
+13. **Store in registry** -- Critical: do NOT use `addOrUpdate()` which would replace the entire entry and lose branch metadata. Instead:
+    ```typescript
+    const registry = loadRegistry();
+    const registryEntry = findByPath(registry, entry.localPath);
+    if (registryEntry) {
+      registryEntry.description = description;
+      saveRegistry(registry);
+    }
+    ```
+14. Display the generated description (same format as `--show` path).
+
+#### Query Resolution Logic
+
+**Mode A: Query provided** (`gitter describe myproject`):
+1. Load registry.
+2. Call `searchEntries(registry, query)`.
+3. 0 matches: stderr `"No repositories match query: {query}"` + `process.exit(1)`.
+4. 1 match: use that entry.
+5. N matches: interactive select via stderr using `@inquirer/prompts` (same pattern as `info`, `go`).
+
+**Mode B: No query** (`gitter describe` from within a registered repo):
+1. Check `isInsideGitRepo()`. If false: stderr error + exit(1).
+2. Get `getRepoRoot()` to get the repo root path.
+3. Load registry.
+4. Call `findByPath(registry, repoRoot)`.
+5. If no match: stderr `"Current repository is not registered. Run 'gitter scan' first."` + exit(1).
+6. Use the found entry.
+
+---
+
+### 10.10 Modifications to Existing Files
+
+#### 10.10.1 `src/types.ts`
+
+Add the `RepoDescription`, `AIProvider`, and `AIConfig` interfaces as specified in Section 10.4. Extend `RegistryEntry` with the optional `description?: RepoDescription` field.
+
+**Lines changed**: ~45 new lines added after the existing `Registry` interface.
+
+#### 10.10.2 `src/commands/info.ts`
+
+Add a description display section at the end of the info output, after the `Last Updated` line (currently line 90).
+
+**Code to add** (after `console.log(pc.bold('Last Updated:')...)`):
+
+```typescript
+// Description section
+console.log();
+if (entry.description) {
+  console.log(pc.bold('--- Description ---'));
+  console.log(`${pc.bold('Business Description:')}`);
+  console.log(entry.description.businessDescription);
+  console.log();
+  console.log(`${pc.bold('Technical Description:')}`);
+  console.log(entry.description.technicalDescription);
+  console.log(`${pc.bold('Description Generated:')} ${entry.description.generatedAt}`);
+  console.log(`${pc.bold('Generated By:')} ${entry.description.generatedBy}`);
+  if (entry.description.instructions) {
+    console.log(`${pc.bold('Instructions Used:')} ${entry.description.instructions}`);
+  }
+} else {
+  console.log(`${pc.bold('Description:')} (none -- run 'gitter describe' to generate)`);
+}
+```
+
+**Lines changed**: ~15 new lines inserted before the function's closing brace.
+
+#### 10.10.3 `src/commands/scan.ts`
+
+Preserve the `description` field across re-scans. After calling `collectRepoMetadata()` and before calling `addOrUpdate()`, carry over the existing description.
+
+**Current code** (lines 22-29):
+```typescript
+const metadata = collectRepoMetadata();
+const registry = loadRegistry();
+
+const existing = findByPath(registry, metadata.localPath);
+const isUpdate = existing !== undefined;
+
+addOrUpdate(registry, metadata);
+saveRegistry(registry);
+```
+
+**Modified code**:
+```typescript
+const metadata = collectRepoMetadata();
+const registry = loadRegistry();
+
+const existing = findByPath(registry, metadata.localPath);
+const isUpdate = existing !== undefined;
+
+// Preserve existing description across re-scans
+if (existing?.description) {
+  metadata.description = existing.description;
+}
+
+addOrUpdate(registry, metadata);
+saveRegistry(registry);
+```
+
+**Lines changed**: +4 lines (the `if` block).
+
+Note: `findByPath` is already imported in `scan.ts` (line 3 of the current file).
+
+#### 10.10.4 `src/cli.ts`
+
+Import and register the describe command.
+
+**Import to add** (after line 7):
+```typescript
+import { describeCommand } from './commands/describe.js';
+```
+
+**Command registration** (add after the `init` command registration, before the default action):
+```typescript
+program
+  .command('describe [query]')
+  .description('Generate or show AI-powered repository description')
+  .option('--instructions <text>', 'Additional instructions for the AI')
+  .option('--show', 'Show stored description without regenerating')
+  .option('--business-lines <n>', 'Target line count for business description', '20')
+  .option('--technical-lines <n>', 'Target line count for technical description', '20')
+  .action(describeCommand);
+```
+
+**Lines changed**: +8 lines.
+
+Note: Commander passes options as the last argument when positional args are optional (`[query]`). The `describeCommand` function signature `(query: string | undefined, options: DescribeOptions)` handles this correctly.
+
+---
+
+### 10.11 Error Handling Summary
+
+| Scenario | Message | Exit Code |
+|----------|---------|:---------:|
+| No AI provider configured | `"GITTER_AI_PROVIDER is not set. Configure via: ..."` | 1 |
+| Missing API key for provider | `"ANTHROPIC_API_KEY is not set. Configure via: ..."` | 1 |
+| AI model not configured | `"GITTER_AI_MODEL is not set. Configure via: ..."` | 1 |
+| Max tokens not configured | `"GITTER_AI_MAX_TOKENS is not set. Configure via: ..."` | 1 |
+| Unknown provider value | `"Unknown AI provider: '<value>'. Must be one of: anthropic, azure, vertex"` | 1 |
+| Config file malformed JSON | `"Config file is corrupted: ~/.gitter/config.json"` | 1 |
+| Invalid maxTokens value | `"Invalid GITTER_AI_MAX_TOKENS value: '<value>'. Must be a positive integer."` | 1 |
+| Claude API auth failure (401/403) | `"Authentication failed for Claude API. Check your API key/credentials."` | 1 |
+| Claude API rate limit (429) | `"Rate limited by Claude API. Please try again later."` | 1 |
+| Claude API unavailable (500/503) | `"Claude API is temporarily unavailable. Please try again later."` | 1 |
+| Claude API network error | `"Failed to connect to Claude API: <details>"` | 1 |
+| Empty AI response | `"Failed to parse AI response. Please try again."` | 1 |
+| Response missing heading | `"Failed to parse AI response: missing '## Technical Description' heading"` | 1 |
+| Repo path does not exist | `"Repository path no longer exists: <path>"` | 1 |
+| Not inside git repo (no query) | `"Not inside a git repository. Provide a repo name or run from within a registered git repository."` | 1 |
+| Repo not registered (no query) | `"Current repository is not registered. Run 'gitter scan' first."` | 1 |
+| No search matches | `"No repositories match query: <query>"` | 1 |
+| `--show` with no description | `"No description available for <name>. Run 'gitter describe' to generate one."` | 0 |
+| Truncated response (max_tokens) | Warning to stderr (not an error, continues) | N/A |
+
+---
+
+### 10.12 Implementation Units for Parallel Coding
+
+The AI description feature can be broken into independent implementation units that can be built by separate agents without file conflicts.
+
+#### 10.12.1 Unit Map
+
+```
++-----------+
+| Unit H    |     (prerequisite: extend types.ts with RepoDescription, AIConfig)
+| types.ts  |
+| extension |
++-----------+
+      |
+      +---> Unit I: ai-config.ts       (Agent 1) --- independent
+      |
+      +---> Unit J: repo-content.ts    (Agent 2) --- independent (uses git.ts)
+      |
+      +---> Unit K: ai-client.ts       (Agent 3) --- independent
+      |
+      +---------------------------------------------+
+                                                     |
+                                               Unit L: describe.ts
+                                               (depends on I, J, K)
+                                                     |
+                                               Unit M: integrations
+                                               (info.ts, scan.ts, cli.ts)
+```
+
+#### 10.12.2 Unit Definitions
+
+**Unit H: Type Extensions** (`src/types.ts`)
+- **Scope**: Add `RepoDescription`, `AIProvider`, `AIConfig` interfaces; extend `RegistryEntry`
+- **Dependencies**: None
+- **Must complete first**: All AI-related units import these types
+- **Effort**: Minimal (~45 lines)
+- **File conflicts**: Modifies `src/types.ts` -- must be done before other units start
+
+**Unit I: AI Configuration** (`src/ai-config.ts`)
+- **Scope**: `loadAIConfig()`, priority resolution, validation
+- **Dependencies**: Unit H (for `AIConfig`, `AIProvider` types), `registry.ts` (for `getRegistryDir()`)
+- **Independent of**: Units J, K
+- **File**: New file `src/ai-config.ts` -- no conflicts with other agents
+- **Testable independently**: Set env vars and call `loadAIConfig()`, verify returned config object
+
+**Unit J: Repository Content Collector** (`src/repo-content.ts`)
+- **Scope**: `collectRepoContent()`, `formatRepoContentForPrompt()`, `applyTokenBudget()`
+- **Dependencies**: `git.ts` (for `git()` function) -- already exists, no modifications needed
+- **Independent of**: Units I, K (no AI config or client dependency)
+- **File**: New file `src/repo-content.ts` -- no conflicts with other agents
+- **Testable independently**: Point at any git repository and verify collected content
+
+**Unit K: AI Client Factory** (`src/ai-client.ts`)
+- **Scope**: `createAIClient()`, `generateDescription()`
+- **Dependencies**: Unit H (for `AIConfig` type), npm packages (`@anthropic-ai/sdk`, `@anthropic-ai/foundry-sdk`, `@anthropic-ai/vertex-sdk`)
+- **Independent of**: Units I, J
+- **File**: New file `src/ai-client.ts` -- no conflicts with other agents
+- **Testable independently**: Create client with valid config, make a simple test API call
+
+**Unit L: Describe Command** (`src/commands/describe.ts`)
+- **Scope**: `describeCommand()` handler, `parseDescription()` helper
+- **Dependencies**: Units H, I, J, K -- all must be complete
+- **File**: New file `src/commands/describe.ts` -- no conflicts with other agents
+- **Cannot start until**: Units I, J, K are complete (or interfaces are agreed and stubbed)
+
+**Unit M: Existing File Integrations** (`src/commands/info.ts`, `src/commands/scan.ts`, `src/cli.ts`)
+- **Scope**: Add description display to info, preserve description in scan, register describe command in CLI
+- **Dependencies**: Units H (types), L (describe command export)
+- **Files modified**: Three existing files -- low risk of conflict if done as a single unit
+- **Can run in parallel with Unit L**: The info.ts and scan.ts changes depend only on Unit H (types), not on Unit L
+
+#### 10.12.3 Parallel Execution Plan
+
+```
+Phase 1: Prerequisites (single agent)
+  npm install @anthropic-ai/sdk @anthropic-ai/foundry-sdk @anthropic-ai/vertex-sdk dotenv
+  Unit H: extend types.ts
+    |
+    +---> Unit I: ai-config.ts         (Agent 1)
+    |
+    +---> Unit J: repo-content.ts      (Agent 2)
+    |
+    +---> Unit K: ai-client.ts         (Agent 3)
+    |
+    +---> Unit M-partial: info.ts +    (Agent 4) -- only needs types
+    |     scan.ts changes
+    |
+    +------ wait for I, J, K ----------+
+                                       |
+                                 Unit L: describe.ts  (single agent)
+                                       |
+                                 Unit M-final: cli.ts wiring
+                                       |
+                                 Build + Test
+```
+
+**Maximum parallelism**: 4 agents (Units I, J, K, and M-partial can all run simultaneously)
+**Minimum agents needed**: 1 (sequential execution)
+
+#### 10.12.4 Interface Contracts Between New Units
+
+| Producer | Consumer | Contract |
+|----------|----------|----------|
+| `types.ts` | All AI modules | Export `RepoDescription`, `AIProvider`, `AIConfig` interfaces |
+| `ai-config.ts` | `describe.ts` | `loadAIConfig(): AIConfig` -- throws on missing config |
+| `ai-client.ts` | `describe.ts` | `createAIClient(config: AIConfig): AIClient` |
+| `ai-client.ts` | `describe.ts` | `generateDescription(client, config, system, user): Promise<string>` |
+| `repo-content.ts` | `describe.ts` | `collectRepoContent(repoPath: string): RepoContent` |
+| `repo-content.ts` | `describe.ts` | `applyTokenBudget(content: RepoContent): string` |
+| `describe.ts` | `cli.ts` | `describeCommand(query?: string, options?: DescribeOptions): Promise<void>` |
+
+---
+
+### 10.13 Configuration Guide Summary
+
+#### Config File Schema: `~/.gitter/config.json`
+
+This file is NOT auto-created. Users create it manually if they prefer file-based configuration over environment variables.
+
+```json
+{
+  "ai": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "maxTokens": 4096,
+    "anthropic": {
+      "apiKey": "sk-ant-..."
+    },
+    "azure": {
+      "apiKey": "...",
+      "resource": "my-resource.azure.anthropic.com"
+    },
+    "vertex": {
+      "projectId": "my-gcp-project",
+      "region": "us-east5"
+    }
+  }
+}
+```
+
+#### Configuration Options and Priority
+
+| Priority | Source | Description |
+|:--------:|--------|-------------|
+| 1 (highest) | Environment variables | Shell-set vars, always take precedence |
+| 2 | `.env` file in `~/.gitter/` | Loaded via dotenv; does NOT override shell env vars |
+| 3 (lowest) | `~/.gitter/config.json` | JSON config file |
+
+If a required configuration value is not found in any source, the tool throws a clear error listing all three configuration methods. No fallback or default values are permitted for any configuration setting.
+
+#### Provider-Specific Configuration
+
+| Provider | Required Config | Auth Method | Model Name Format |
+|----------|----------------|-------------|-------------------|
+| `anthropic` | `provider`, `model`, `maxTokens`, `anthropic.apiKey` | API key | `claude-sonnet-4-20250514` (dash format) |
+| `azure` | `provider`, `model`, `maxTokens`, `azure.apiKey`, `azure.resource` | API key | `claude-sonnet-4-20250514` (dash format) |
+| `vertex` | `provider`, `model`, `maxTokens`, `vertex.projectId`, `vertex.region` | Google ADC (no API key) | `claude-sonnet-4@20250514` (@ format) |
+
+**Vertex AI Model Name Format**: Vertex uses `@` separator (e.g., `claude-sonnet-4@20250514`), while Anthropic and Azure use `-` (e.g., `claude-sonnet-4-20250514`). Users must configure the correct format for their provider.
+
+**Vertex AI Authentication**: Uses Google Application Default Credentials (ADC). Requires one of:
+- `gcloud auth application-default login` run locally
+- `GOOGLE_APPLICATION_CREDENTIALS` env var pointing to a service account key file
+- Running on GCP with an attached service account
+
+#### API Key Expiration Tracking (Optional Enhancement)
+
+An optional `GITTER_AI_KEY_EXPIRY` parameter (or `ai.keyExpiry` in config.json) can capture the API key expiration date in ISO 8601 format. When set, the tool logs a warning to stderr if the key expires within 7 days:
+```
+Warning: Your AI API key expires on 2026-04-15. Please renew it before expiration.
+```
+
+This is deferred to a future version but the config schema accommodates it.
+
+#### Minimal `.env` Examples
+
+**Anthropic Direct**:
+```env
+GITTER_AI_PROVIDER=anthropic
+GITTER_AI_MODEL=claude-sonnet-4-20250514
+GITTER_AI_MAX_TOKENS=4096
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Azure AI Foundry**:
+```env
+GITTER_AI_PROVIDER=azure
+GITTER_AI_MODEL=claude-sonnet-4-20250514
+GITTER_AI_MAX_TOKENS=4096
+ANTHROPIC_FOUNDRY_API_KEY=your-azure-key
+ANTHROPIC_FOUNDRY_RESOURCE=my-resource.azure.anthropic.com
+```
+
+**Google Vertex AI**:
+```env
+GITTER_AI_PROVIDER=vertex
+GITTER_AI_MODEL=claude-sonnet-4@20250514
+GITTER_AI_MAX_TOKENS=4096
+ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+CLOUD_ML_REGION=us-east5
+```
+
+---
+
+### 10.14 New Dependencies
+
+| Package | Purpose | Type |
+|---------|---------|------|
+| `@anthropic-ai/sdk` | Direct Anthropic Claude API client | Production |
+| `@anthropic-ai/foundry-sdk` | Azure AI Foundry (Claude on Azure) client | Production |
+| `@anthropic-ai/vertex-sdk` | Google Vertex AI client | Production |
+| `dotenv` | Load `.env` files for configuration resolution | Production |
+
+**Install command**:
+```bash
+npm install @anthropic-ai/sdk @anthropic-ai/foundry-sdk @anthropic-ai/vertex-sdk dotenv
+```
+
+---
+
+### 10.15 Updated File Structure
+
+```
+gitter/
+|-- package.json
+|-- tsconfig.json
+|-- src/
+|   |-- cli.ts                  # Entry point -- add describe command registration
+|   |-- types.ts                # Add RepoDescription, AIProvider, AIConfig interfaces
+|   |-- git.ts                  # Unchanged (reused by repo-content.ts)
+|   |-- registry.ts             # Unchanged (handles arbitrary JSON transparently)
+|   |-- ai-config.ts            # NEW: Config loading with priority resolution
+|   |-- ai-client.ts            # NEW: Client factory + messages.create wrapper
+|   |-- repo-content.ts         # NEW: Repo content collection and formatting
+|   |-- commands/
+|       |-- scan.ts             # Modified: preserve description across re-scans
+|       |-- list.ts             # Unchanged
+|       |-- search.ts           # Unchanged
+|       |-- go.ts               # Unchanged
+|       |-- info.ts             # Modified: add description display section
+|       |-- remove.ts           # Unchanged (removing entry removes description)
+|       |-- init.ts             # Unchanged
+|       |-- describe.ts         # NEW: gitter describe command handler
+|-- dist/
+|-- node_modules/
+|-- test_scripts/
+|-- docs/
+|   |-- design/
+|   |   |-- project-design.md
+|   |   |-- plan-002-ai-descriptions.md
+|   |   |-- configuration-guide.md
+|   |   |-- project-functions.md
+|   |-- reference/
+|       |-- refined-request-ai-repo-descriptions.md
+|       |-- investigation-ai-integration.md
+|-- Issues - Pending Items.md
+```
+
+Runtime artifacts:
+```
+~/.gitter/
+|-- registry.json               # Persistent registry (now with optional description fields)
+|-- config.json                 # Optional AI configuration file (user-created)
+|-- .env                        # Optional environment variable file (user-created)
+```
+
+---
+
+### 10.16 Updated Technology Stack
+
+| Component | Technology | Version | Status |
+|-----------|-----------|---------|--------|
+| Language | TypeScript | 5.x | Existing |
+| Runtime | Node.js | Latest LTS | Existing |
+| Module System | ESM (`"type": "module"`) | -- | Existing |
+| CLI Framework | commander.js | 14.x | Existing |
+| Interactive Prompts | @inquirer/prompts | 8.x | Existing |
+| Terminal Colors | picocolors | 1.x | Existing |
+| Table Output | cli-table3 | 0.6.x | Existing |
+| Git Interaction | child_process (built-in) | -- | Existing |
+| File I/O | fs (built-in) | -- | Existing |
+| Dev Runner | tsx | 4.x | Existing |
+| Compiler | tsc (TypeScript) | 5.x | Existing |
+| AI Client (Direct) | @anthropic-ai/sdk | latest | **New** |
+| AI Client (Azure) | @anthropic-ai/foundry-sdk | latest | **New** |
+| AI Client (Vertex) | @anthropic-ai/vertex-sdk | latest | **New** |
+| Env File Loading | dotenv | latest | **New** |
+
+**Production dependencies**: 8 (4 existing + 4 new)
+**Dev dependencies**: 3 (unchanged)
+
+---
+
+### 10.17 Files Changed Summary
+
+#### New Files
+
+| File | Purpose | Est. Lines |
+|------|---------|-----------|
+| `src/ai-config.ts` | Configuration loading with three-tier priority resolution | ~120 |
+| `src/ai-client.ts` | Client factory + `messages.create()` wrapper with error handling | ~90 |
+| `src/repo-content.ts` | Repository content collection, formatting, and budget management | ~150 |
+| `src/commands/describe.ts` | `gitter describe` command handler | ~180 |
+
+#### Modified Files
+
+| File | Change | Est. Lines Changed |
+|------|--------|-------------------|
+| `src/types.ts` | Add `RepoDescription`, `AIProvider`, `AIConfig` interfaces; extend `RegistryEntry` | +45 |
+| `src/commands/info.ts` | Add description display section at end of output | +15 |
+| `src/commands/scan.ts` | Preserve `description` field across re-scans | +4 |
+| `src/cli.ts` | Import + register `describe` command | +8 |
+| `package.json` | New dependencies (auto-updated by npm install) | auto |
+
+#### Unchanged Files
+
+| File | Reason |
+|------|--------|
+| `src/registry.ts` | Handles arbitrary JSON transparently; `description` field serializes/deserializes without changes |
+| `src/git.ts` | Reused as-is; `git()` function called from `repo-content.ts` |
+| `src/commands/go.ts` | No description interaction |
+| `src/commands/search.ts` | No description interaction |
+| `src/commands/list.ts` | No description interaction |
+| `src/commands/remove.ts` | Removing an entry removes its description automatically |
+| `src/commands/init.ts` | Shell function unchanged |
