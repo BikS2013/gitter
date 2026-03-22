@@ -1,5 +1,5 @@
 import { existsSync } from 'fs';
-import { select } from '@inquirer/prompts';
+import { select, editor } from '@inquirer/prompts';
 import pc from 'picocolors';
 import { loadRegistry, saveRegistry, findByPath, searchEntries } from '../registry.js';
 import { isInsideGitRepo, getRepoRoot } from '../git.js';
@@ -10,6 +10,7 @@ import type { RegistryEntry } from '../types.js';
 
 interface DescribeCmdOptions {
   show?: boolean;
+  edit?: boolean;
   instructions?: string;
   businessLines?: string;
   technicalLines?: string;
@@ -90,6 +91,55 @@ export async function describeCommand(query: string | undefined, options: Descri
   // --show: display stored description without calling AI
   if (options.show) {
     displayDescription(entry);
+    return;
+  }
+
+  // --edit: open descriptions in editor for manual editing
+  if (options.edit) {
+    const existing = entry.description;
+    const defaultText = existing
+      ? `## Business Description\n${existing.businessDescription}\n\n## Technical Description\n${existing.technicalDescription}`
+      : `## Business Description\n\n\n## Technical Description\n`;
+
+    const edited = await editor({
+      message: `Edit description for ${entry.repoName} (save and close editor when done):`,
+      default: defaultText,
+      postfix: '.md',
+    });
+
+    const trimmed = edited.trim();
+    if (!trimmed) {
+      console.log('Empty description, no changes saved.');
+      return;
+    }
+
+    // Parse the edited text by splitting on ## Technical Description
+    const techMarker = '## Technical Description';
+    const techIdx = trimmed.indexOf(techMarker);
+    let business: string;
+    let technical: string;
+    if (techIdx >= 0) {
+      business = trimmed.slice(0, techIdx).replace(/^## Business Description\s*\n?/, '').trim();
+      technical = trimmed.slice(techIdx + techMarker.length).trim();
+    } else {
+      business = trimmed.replace(/^## Business Description\s*\n?/, '').trim();
+      technical = '';
+    }
+
+    const registry = loadRegistry();
+    const registryEntry = findByPath(registry, entry.localPath);
+    if (registryEntry) {
+      registryEntry.description = {
+        businessDescription: business,
+        technicalDescription: technical,
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'manual-edit',
+        ...(existing?.instructions ? { instructions: existing.instructions } : {}),
+      };
+      saveRegistry(registry);
+    }
+
+    console.log(`Description saved for ${pc.bold(entry.repoName)}.`);
     return;
   }
 

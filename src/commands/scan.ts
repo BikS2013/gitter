@@ -25,9 +25,12 @@ export async function scanCommand(): Promise<void> {
   const existing = findByPath(registry, metadata.localPath);
   const isUpdate = existing !== undefined;
 
-  // Preserve existing description across re-scans
+  // Preserve existing description and notes across re-scans
   if (existing?.description) {
     metadata.description = existing.description;
+  }
+  if (existing?.notes) {
+    metadata.notes = existing.notes;
   }
 
   addOrUpdate(registry, metadata);

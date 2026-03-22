@@ -9,6 +9,8 @@ import { infoCommand } from './commands/info.js';
 import { removeCommand } from './commands/remove.js';
 import { initCommand } from './commands/init.js';
 import { describeCommand } from './commands/describe.js';
+import { renameCommand } from './commands/rename.js';
+import { notesCommand } from './commands/notes.js';
 import { isInsideGitRepo } from './git.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -61,9 +63,21 @@ program
   .description('Generate or show AI-powered repository description')
   .option('--instructions <text>', 'Additional instructions for the AI')
   .option('--show', 'Show stored description without regenerating')
+  .option('--edit', 'Edit description manually in your editor')
   .option('--business-lines <n>', 'Target line count for business description', '20')
   .option('--technical-lines <n>', 'Target line count for technical description', '20')
   .action(describeCommand);
+
+program
+  .command('rename <query> <new-name>')
+  .description('Rename a repository in the registry')
+  .action(renameCommand);
+
+program
+  .command('notes [query]')
+  .description('Add or edit user notes for a repository')
+  .option('--clear', 'Remove notes from the repository')
+  .action(notesCommand);
 
 // Default action: no subcommand provided
 program.action(async () => {

@@ -106,5 +106,14 @@ export async function infoCommand(query: string): Promise<void> {
   } else {
     console.log(`${pc.bold('Description:')} (none -- run 'gitter describe' to generate)`);
   }
+
+  // Notes section
+  console.log();
+  if (entry.notes) {
+    console.log(pc.bold('--- Notes ---'));
+    console.log(entry.notes);
+  } else {
+    console.log(`${pc.bold('Notes:')} (none -- run 'gitter notes' to add)`);
+  }
   console.log();
 }

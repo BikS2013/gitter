@@ -31,6 +31,8 @@ export interface RegistryEntry {
   lastUpdated: string;
   /** AI-generated description of the repository (optional, populated by describe command) */
   description?: RepoDescription;
+  /** User notes in markdown format (optional, populated by notes command) */
+  notes?: string;
 }
 
 /**
