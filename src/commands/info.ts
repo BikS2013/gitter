@@ -1,0 +1,91 @@
+import { existsSync } from 'fs';
+import pc from 'picocolors';
+import { select } from '@inquirer/prompts';
+import { loadRegistry, searchEntries } from '../registry.js';
+import type { RegistryEntry } from '../types.js';
+
+/**
+ * Handler for `gitter info <query>` command.
+ *
+ * Behavior:
+ * 1. Load registry, search for matches
+ * 2. If 0 matches -> stderr error + exit(1)
+ * 3. If N matches -> interactive select (prompts to stderr)
+ * 4. Display full metadata for the selected entry
+ */
+export async function infoCommand(query: string): Promise<void> {
+  const registry = loadRegistry();
+  const matches = searchEntries(registry, query);
+
+  if (matches.length === 0) {
+    process.stderr.write(`No repositories match query: ${query}\n`);
+    process.exit(1);
+  }
+
+  let entry: RegistryEntry;
+
+  if (matches.length === 1) {
+    entry = matches[0];
+  } else {
+    entry = await select<RegistryEntry>({
+      message: 'Multiple repositories matched. Select one:',
+      choices: matches.map(e => ({
+        name: `${e.repoName} (${e.localPath})`,
+        value: e,
+        description: `Last updated: ${e.lastUpdated}`,
+      })),
+    }, {
+      output: process.stderr,
+    });
+  }
+
+  const pathExists = existsSync(entry.localPath);
+  const pathDisplay = pathExists
+    ? entry.localPath
+    : `${entry.localPath} ${pc.red('[MISSING]')}`;
+
+  console.log(`\n${pc.bold('Repository Name:')}  ${entry.repoName}`);
+  console.log(`${pc.bold('Local Path:')}       ${pathDisplay}`);
+
+  // Remotes
+  console.log(`${pc.bold('Remotes:')}`);
+  if (entry.remotes.length === 0) {
+    console.log('  (none)');
+  } else {
+    for (const remote of entry.remotes) {
+      console.log(`  ${pc.cyan(remote.name)}`);
+      console.log(`    fetch: ${remote.fetchUrl}`);
+      console.log(`    push:  ${remote.pushUrl}`);
+    }
+  }
+
+  // Local Branches
+  console.log(`${pc.bold('Local Branches:')}`);
+  if (entry.localBranches.length === 0) {
+    console.log('  (none)');
+  } else {
+    for (const branch of entry.localBranches) {
+      if (branch === entry.currentBranch) {
+        console.log(`  ${pc.green('* ' + branch)}`);
+      } else {
+        console.log(`    ${branch}`);
+      }
+    }
+  }
+
+  // Remote Branches
+  console.log(`${pc.bold('Remote Branches:')}`);
+  if (entry.remoteBranches.length === 0) {
+    console.log('  (none)');
+  } else {
+    for (const branch of entry.remoteBranches) {
+      console.log(`    ${branch}`);
+    }
+  }
+
+  // Current Branch
+  console.log(`${pc.bold('Current Branch:')}   ${pc.green(entry.currentBranch)}`);
+
+  // Last Updated
+  console.log(`${pc.bold('Last Updated:')}     ${entry.lastUpdated}\n`);
+}
