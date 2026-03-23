@@ -68,6 +68,11 @@ function displayDescription(entry: RegistryEntry): void {
     return;
   }
 
+  if (entry.tags && entry.tags.length > 0) {
+    console.log(`${pc.bold('Tags:')} ${entry.tags.map(t => pc.cyan(t)).join(', ')}`);
+    console.log();
+  }
+
   const desc = entry.description;
   console.log(pc.bold('--- Business Description ---'));
   console.log(desc.businessDescription);

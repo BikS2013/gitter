@@ -33,6 +33,8 @@ export interface RegistryEntry {
   description?: RepoDescription;
   /** User notes in markdown format (optional, populated by notes command) */
   notes?: string;
+  /** User-assigned tags/labels (optional, lowercase, sorted alphabetically) */
+  tags?: string[];
 }
 
 /**

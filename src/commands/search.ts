@@ -17,7 +17,7 @@ export async function searchCommand(query: string): Promise<void> {
   }
 
   const table = new Table({
-    head: [pc.bold('Repo Name'), pc.bold('Local Path'), pc.bold('Remotes'), pc.bold('Last Updated')],
+    head: [pc.bold('Repo Name'), pc.bold('Local Path'), pc.bold('Remotes'), pc.bold('Tags'), pc.bold('Last Updated')],
   });
 
   for (const entry of matches) {
@@ -26,7 +26,8 @@ export async function searchCommand(query: string): Promise<void> {
     const remoteCount = entry.remotes.length;
     const lastUpdated = new Date(entry.lastUpdated).toLocaleString();
 
-    table.push([repoName, entry.localPath, remoteCount, lastUpdated]);
+    const tags = entry.tags?.join(', ') ?? '';
+    table.push([repoName, entry.localPath, remoteCount, tags, lastUpdated]);
   }
 
   console.log(table.toString());

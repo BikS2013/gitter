@@ -134,6 +134,7 @@ export function searchEntries(registry: Registry, query: string): RegistryEntry[
       if (remote.fetchUrl.toLowerCase().includes(q)) return true;
       if (remote.pushUrl.toLowerCase().includes(q)) return true;
     }
+    if (entry.tags?.some(tag => tag.includes(q))) return true;
     return false;
   });
 }

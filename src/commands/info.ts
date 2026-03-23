@@ -89,6 +89,13 @@ export async function infoCommand(query: string): Promise<void> {
   // Last Updated
   console.log(`${pc.bold('Last Updated:')}     ${entry.lastUpdated}`);
 
+  // Tags
+  if (entry.tags && entry.tags.length > 0) {
+    console.log(`${pc.bold('Tags:')}             ${entry.tags.map(t => pc.cyan(t)).join(', ')}`);
+  } else {
+    console.log(`${pc.bold('Tags:')}             (none -- run 'gitter tag' to add)`);
+  }
+
   // Description section
   console.log();
   if (entry.description) {
