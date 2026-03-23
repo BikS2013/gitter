@@ -61,7 +61,7 @@ function createClient(config: AIConfig): AIClient {
 function buildSystemPrompt(options: DescribeOptions): string {
   return `You are an expert technical writer analyzing a software repository. Your task is to produce two descriptions:
 
-1. **Business Description** (~${options.businessLines} lines): Explain the purpose, use cases, and value proposition of this project from a business/stakeholder perspective. Focus on what problems it solves, who benefits, and why it matters.
+1. **Business Description** (~${options.businessLines} lines): Explain the purpose, use cases, and value proposition of this project from a business/stakeholder perspective. Focus on what problems it solves, who benefits, and why it matters. Write for a non-technical audience — avoid technical terms like repositories, APIs, frameworks, databases, deployments, etc. Use plain business language that executives and stakeholders would understand.
 
 2. **Technical Description** (~${options.technicalLines} lines): Describe the technical approach, architecture, key technologies, and engineering value. Focus on how it works, design decisions, and technical merits.
 
@@ -238,9 +238,9 @@ export async function generateTagDescription(
 
   const systemPrompt = `You are an expert technical writer analyzing a group of interconnected software repositories that are tagged together. Your task is to identify what system or product these repos form together and describe their relationship.
 
-1. **Business Description** (~${options.businessLines} lines): Explain what system or product these repositories form together. What business problem does this group of repos solve as a whole? How do they serve users or stakeholders as a unified system? Identify the role of each repo in the overall product.
+1. **Business Description** (~${options.businessLines} lines): Explain what system or product these components form together. What business problem does this group solve as a whole? How do they serve users or stakeholders as a unified system? Identify the role of each component in the overall product. Highlight the synergies — explain what value emerges from these components working together that none of them could deliver alone. Write for a non-technical audience — avoid technical terms like repositories, APIs, frameworks, databases, deployments, etc. Use plain business language that executives and stakeholders would understand.
 
-2. **Technical Description** (~${options.technicalLines} lines): Describe the technical architecture of the system. How do these repos connect to each other? Identify patterns like frontend/backend/middleware/infrastructure, API boundaries, shared data stores, message queues, deployment topology, and dependencies between repos.
+2. **Technical Description** (~${options.technicalLines} lines): Describe the technical architecture of the system. How do these components connect to each other? Identify patterns like frontend/backend/middleware/infrastructure, API boundaries, shared data stores, message queues, deployment topology, and dependencies between them.
 
 Format your response as markdown with exactly these two sections:
 
