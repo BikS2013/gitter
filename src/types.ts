@@ -33,6 +33,8 @@ export interface RegistryEntry {
   description?: RepoDescription;
   /** User notes in markdown format (optional, populated by notes command) */
   notes?: string;
+  /** User-assigned tags/labels (optional, lowercase, sorted alphabetically) */
+  tags?: string[];
 }
 
 /**
@@ -83,6 +85,24 @@ export interface AIConfig {
 }
 
 /**
+ * AI-generated description of how multiple repos under a tag relate to each other.
+ */
+export interface TagDescription {
+  /** Business-oriented description of the system these repos form */
+  businessDescription: string;
+  /** Technical description of the architecture and how repos interconnect */
+  technicalDescription: string;
+  /** ISO 8601 timestamp of when this description was generated */
+  generatedAt: string;
+  /** The AI model identifier used to generate this description */
+  generatedBy: string;
+  /** Repo names included in this description */
+  repos: string[];
+  /** Custom user instructions used during generation (if any) */
+  instructions?: string;
+}
+
+/**
  * Top-level registry structure stored in ~/.gitter/registry.json.
  */
 export interface Registry {
@@ -90,4 +110,6 @@ export interface Registry {
   version: number;
   /** All registered repositories */
   repositories: RegistryEntry[];
+  /** AI-generated descriptions for tag groups (keyed by tag name) */
+  tagDescriptions?: Record<string, TagDescription>;
 }

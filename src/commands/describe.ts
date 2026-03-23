@@ -4,9 +4,9 @@ import pc from 'picocolors';
 import { loadRegistry, saveRegistry, findByPath, searchEntries } from '../registry.js';
 import { isInsideGitRepo, getRepoRoot } from '../git.js';
 import { loadAIConfig } from '../ai-config.js';
-import { generateDescription } from '../ai-client.js';
+import { generateDescription, generateTagDescription } from '../ai-client.js';
 import { collectRepoContent, applyTokenBudget } from '../repo-content.js';
-import type { RegistryEntry } from '../types.js';
+import type { RegistryEntry, TagDescription } from '../types.js';
 
 interface DescribeCmdOptions {
   show?: boolean;
@@ -14,6 +14,7 @@ interface DescribeCmdOptions {
   instructions?: string;
   businessLines?: string;
   technicalLines?: string;
+  tag?: string;
 }
 
 /**
@@ -68,6 +69,11 @@ function displayDescription(entry: RegistryEntry): void {
     return;
   }
 
+  if (entry.tags && entry.tags.length > 0) {
+    console.log(`${pc.bold('Tags:')} ${entry.tags.map(t => pc.cyan(t)).join(', ')}`);
+    console.log();
+  }
+
   const desc = entry.description;
   console.log(pc.bold('--- Business Description ---'));
   console.log(desc.businessDescription);
@@ -85,7 +91,92 @@ function displayDescription(entry: RegistryEntry): void {
 /**
  * Handler for `gitter describe [query]` command.
  */
+function displayTagDescription(tag: string, desc: TagDescription): void {
+  console.log(pc.bold(`--- Tag: ${tag} ---`));
+  console.log(`${pc.bold('Repos:')} ${desc.repos.join(', ')}`);
+  console.log();
+  console.log(pc.bold('--- Business Description ---'));
+  console.log(desc.businessDescription);
+  console.log();
+  console.log(pc.bold('--- Technical Description ---'));
+  console.log(desc.technicalDescription);
+  console.log();
+  console.log(`${pc.bold('Generated:')} ${desc.generatedAt}`);
+  console.log(`${pc.bold('Model:')} ${desc.generatedBy}`);
+  if (desc.instructions) {
+    console.log(`${pc.bold('Instructions:')} ${desc.instructions}`);
+  }
+}
+
 export async function describeCommand(query: string | undefined, options: DescribeCmdOptions): Promise<void> {
+  // --tag: describe the relationship between all repos sharing a tag
+  if (options.tag) {
+    const registry = loadRegistry();
+    const filterTag = options.tag.toLowerCase();
+    const repos = registry.repositories.filter(e => e.tags?.includes(filterTag));
+
+    if (repos.length === 0) {
+      process.stderr.write(`No repositories with tag: ${options.tag}\n`);
+      process.exit(1);
+    }
+
+    // --show: display stored tag description
+    if (options.show) {
+      const stored = registry.tagDescriptions?.[filterTag];
+      if (!stored) {
+        console.log(`No description for tag "${options.tag}". Run 'gitter describe --tag ${options.tag}' to generate one.`);
+        return;
+      }
+      displayTagDescription(options.tag, stored);
+      return;
+    }
+
+    const config = loadAIConfig();
+    const businessLines = parseInt(options.businessLines ?? '20', 10);
+    const technicalLines = parseInt(options.technicalLines ?? '20', 10);
+
+    process.stderr.write(`Generating description for tag ${pc.bold(options.tag)} (${repos.length} repos)...\n`);
+
+    const repoContents: Array<{ repoName: string; content: string }> = [];
+    for (const repo of repos) {
+      if (!existsSync(repo.localPath)) {
+        process.stderr.write(`  Skipping ${repo.repoName}: path no longer exists\n`);
+        continue;
+      }
+      process.stderr.write(`  Collecting content from ${pc.bold(repo.repoName)}...\n`);
+      const content = collectRepoContent(repo.localPath);
+      const budgeted = applyTokenBudget(content);
+      repoContents.push({ repoName: repo.repoName, content: budgeted });
+    }
+
+    if (repoContents.length === 0) {
+      process.stderr.write('No accessible repositories to describe.\n');
+      process.exit(1);
+    }
+
+    const totalSize = repoContents.reduce((sum, r) => sum + Buffer.byteLength(r.content, 'utf-8'), 0);
+    if (totalSize > 200_000) {
+      process.stderr.write(`Warning: Combined content is ~${Math.round(totalSize / 1024)}KB (~${Math.round(totalSize / 4)} tokens). This may exceed model limits.\n`);
+    }
+
+    const tagDesc = await generateTagDescription(config, repoContents, {
+      businessLines,
+      technicalLines,
+      instructions: options.instructions,
+    });
+
+    // Store in registry
+    if (!registry.tagDescriptions) {
+      registry.tagDescriptions = {};
+    }
+    registry.tagDescriptions[filterTag] = tagDesc;
+    saveRegistry(registry);
+
+    console.log();
+    displayTagDescription(options.tag, tagDesc);
+    return;
+  }
+
   const entry = await resolveEntry(query);
 
   // --show: display stored description without calling AI

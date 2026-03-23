@@ -11,6 +11,7 @@ import { initCommand } from './commands/init.js';
 import { describeCommand } from './commands/describe.js';
 import { renameCommand } from './commands/rename.js';
 import { notesCommand } from './commands/notes.js';
+import { tagCommand } from './commands/tag.js';
 import { uiCommand } from './commands/ui.js';
 import { isInsideGitRepo } from './git.js';
 
@@ -32,6 +33,7 @@ program
 program
   .command('list')
   .description('List all registered repositories')
+  .option('--tag <tag>', 'Filter repositories by tag')
   .action(listCommand);
 
 program
@@ -67,6 +69,7 @@ program
   .option('--edit', 'Edit description manually in your editor')
   .option('--business-lines <n>', 'Target line count for business description', '20')
   .option('--technical-lines <n>', 'Target line count for technical description', '20')
+  .option('--tag <tag>', 'Describe the relationship between all repos with this tag')
   .action(describeCommand);
 
 program
@@ -79,6 +82,15 @@ program
   .description('Add or edit user notes for a repository')
   .option('--clear', 'Remove notes from the repository')
   .action(notesCommand);
+
+program
+  .command('tag [query]')
+  .description('Add, remove, or manage tags for a repository')
+  .option('--add <tag>', 'Add a tag to the repository')
+  .option('--remove <tag>', 'Remove a tag from the repository')
+  .option('--clear', 'Remove all tags from the repository')
+  .option('--list', 'Show all tags across the registry with repo counts')
+  .action(tagCommand);
 
 program
   .command('ui')

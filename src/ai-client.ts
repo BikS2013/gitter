@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicFoundry } from '@anthropic-ai/foundry-sdk';
 import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
-import type { AIConfig, RepoDescription } from './types.js';
+import type { AIConfig, RepoDescription, TagDescription } from './types.js';
 
 /**
  * Options controlling how the AI generates or refines a repository description.
@@ -61,9 +61,9 @@ function createClient(config: AIConfig): AIClient {
 function buildSystemPrompt(options: DescribeOptions): string {
   return `You are an expert technical writer analyzing a software repository. Your task is to produce two descriptions:
 
-1. **Business Description** (~${options.businessLines} lines): Explain the purpose, use cases, and value proposition of this project from a business/stakeholder perspective. Focus on what problems it solves, who benefits, and why it matters.
+1. **Business Description** (~${options.businessLines} lines): Explain the purpose, use cases, and value proposition of this project from a business/stakeholder perspective. Focus on what problems it solves, who benefits, and why it matters. Write for a non-technical audience — avoid technical terms like repositories, APIs, frameworks, databases, deployments, etc. Use plain business language that executives and stakeholders would understand.
 
-2. **Technical Description** (~${options.technicalLines} lines): Describe the technical approach, architecture, key technologies, and engineering value. Focus on how it works, design decisions, and technical merits.
+2. **Technical Description** (~${options.technicalLines} lines): Describe the technical approach, architecture, key technologies, and engineering value. Focus on how it works, design decisions, and technical merits. Do not reference specific files, classes, functions, or code paths — keep this at a high level describing functionality and how it is achieved architecturally.
 
 Format your response as markdown with exactly these two sections:
 
@@ -202,6 +202,107 @@ export async function generateDescription(
       throw new Error(
         'Authentication failed for Claude API. Check your API key/credentials.'
       );
+    }
+    if (err.status === 429) {
+      throw new Error('Rate limited by Claude API. Please try again later.');
+    }
+    if (err.status === 500 || err.status === 503) {
+      throw new Error('Claude API is temporarily unavailable. Please try again later.');
+    }
+    if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+      throw new Error(`Failed to connect to Claude API: ${err.message}`);
+    }
+
+    throw new Error(`Claude API error: ${err.message ?? 'Unknown error'}`);
+  }
+}
+
+/**
+ * Options for generating a tag-level description across multiple repos.
+ */
+export interface TagDescribeOptions {
+  businessLines: number;
+  technicalLines: number;
+  instructions?: string;
+}
+
+/**
+ * Generate a description of how multiple repos under a tag relate to each other.
+ */
+export async function generateTagDescription(
+  config: AIConfig,
+  repoContents: Array<{ repoName: string; content: string }>,
+  options: TagDescribeOptions,
+): Promise<TagDescription> {
+  const client = createClient(config);
+
+  const systemPrompt = `You are an expert technical writer analyzing a group of interconnected software repositories that are tagged together. Your task is to identify what system or product these repos form together and describe their relationship.
+
+1. **Business Description** (~${options.businessLines} lines): Explain what system or product these components form together. What business problem does this group solve as a whole? How do they serve users or stakeholders as a unified system? Identify the role of each component in the overall product. Highlight the synergies — explain what value emerges from these components working together that none of them could deliver alone. Write for a non-technical audience — avoid technical terms like repositories, APIs, frameworks, databases, deployments, etc. Use plain business language that executives and stakeholders would understand.
+
+2. **Technical Description** (~${options.technicalLines} lines): Describe the technical architecture of the system. How do these components connect to each other? Identify patterns like frontend/backend/middleware/infrastructure, API boundaries, shared data stores, message queues, deployment topology, and dependencies between them. Do not reference specific files, classes, functions, or code paths — keep this at a high level describing functionality and how it is achieved architecturally. If the relationships between components can be meaningfully visualized, include a Mermaid diagram (e.g., flowchart, sequence diagram, or C4 context diagram) showing how the components interact.
+
+Format your response as markdown with exactly these two sections:
+
+## Business Description
+[business description here]
+
+## Technical Description
+[technical description here]`;
+
+  let userMessage = 'Analyze these interconnected repositories and describe the system they form together.\n\n';
+
+  if (options.instructions) {
+    userMessage += `=== ADDITIONAL INSTRUCTIONS ===\n${options.instructions}\n\n`;
+  }
+
+  for (const repo of repoContents) {
+    userMessage += `=== REPOSITORY: ${repo.repoName} ===\n${repo.content}\n\n`;
+  }
+
+  try {
+    const response = await client.messages.create({
+      model: config.model,
+      max_tokens: config.maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+
+    const textContent = response.content
+      .filter((block) => block.type === 'text')
+      .map((block) => 'text' in block ? block.text : '')
+      .join('\n');
+
+    if (!textContent) {
+      throw new Error('Failed to parse AI response: empty response. Please try again.');
+    }
+
+    if (response.stop_reason === 'max_tokens') {
+      process.stderr.write(
+        'Warning: AI response was truncated due to max_tokens limit. ' +
+        'Consider increasing GITTER_AI_MAX_TOKENS.\n'
+      );
+    }
+
+    const parsed = parseResponse(textContent);
+
+    return {
+      businessDescription: parsed.businessDescription,
+      technicalDescription: parsed.technicalDescription,
+      generatedAt: new Date().toISOString(),
+      generatedBy: config.model,
+      repos: repoContents.map(r => r.repoName),
+      instructions: options.instructions,
+    };
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.startsWith('Failed to parse')) {
+      throw error;
+    }
+
+    const err = error as { status?: number; message?: string; code?: string };
+
+    if (err.status === 401 || err.status === 403) {
+      throw new Error('Authentication failed for Claude API. Check your API key/credentials.');
     }
     if (err.status === 429) {
       throw new Error('Rate limited by Claude API. Please try again later.');
