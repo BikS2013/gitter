@@ -69,6 +69,7 @@ program
   .option('--edit', 'Edit description manually in your editor')
   .option('--business-lines <n>', 'Target line count for business description', '20')
   .option('--technical-lines <n>', 'Target line count for technical description', '20')
+  .option('--tag <tag>', 'Describe the relationship between all repos with this tag')
   .action(describeCommand);
 
 program
