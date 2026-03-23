@@ -240,7 +240,7 @@ export async function generateTagDescription(
 
 1. **Business Description** (~${options.businessLines} lines): Explain what system or product these components form together. What business problem does this group solve as a whole? How do they serve users or stakeholders as a unified system? Identify the role of each component in the overall product. Highlight the synergies — explain what value emerges from these components working together that none of them could deliver alone. Write for a non-technical audience — avoid technical terms like repositories, APIs, frameworks, databases, deployments, etc. Use plain business language that executives and stakeholders would understand.
 
-2. **Technical Description** (~${options.technicalLines} lines): Describe the technical architecture of the system. How do these components connect to each other? Identify patterns like frontend/backend/middleware/infrastructure, API boundaries, shared data stores, message queues, deployment topology, and dependencies between them.
+2. **Technical Description** (~${options.technicalLines} lines): Describe the technical architecture of the system. How do these components connect to each other? Identify patterns like frontend/backend/middleware/infrastructure, API boundaries, shared data stores, message queues, deployment topology, and dependencies between them. If the relationships between components can be meaningfully visualized, include a Mermaid diagram (e.g., flowchart, sequence diagram, or C4 context diagram) showing how the components interact.
 
 Format your response as markdown with exactly these two sections:
 
