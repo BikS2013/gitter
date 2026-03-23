@@ -11,6 +11,7 @@ import { initCommand } from './commands/init.js';
 import { describeCommand } from './commands/describe.js';
 import { renameCommand } from './commands/rename.js';
 import { notesCommand } from './commands/notes.js';
+import { uiCommand } from './commands/ui.js';
 import { isInsideGitRepo } from './git.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -78,6 +79,13 @@ program
   .description('Add or edit user notes for a repository')
   .option('--clear', 'Remove notes from the repository')
   .action(notesCommand);
+
+program
+  .command('ui')
+  .description('Open the registry browser in your web browser')
+  .option('--port <n>', 'Port number for the web server', '3000')
+  .option('--no-open', 'Do not automatically open the browser')
+  .action(uiCommand);
 
 // Default action: no subcommand provided
 program.action(async () => {
