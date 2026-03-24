@@ -253,6 +253,121 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 
 ---
 
+### FR-16: Repository Tagging - Data Model
+
+**Description**: Each `RegistryEntry` gains an optional `tags?: string[]` field for user-assigned categorization tags. Tags are case-insensitive for matching but stored in the case the user provides. No duplicate tags within a single repo (compared case-insensitively). Tags are persisted in `~/.gitter/registry.json` alongside all other entry fields.
+
+**Tag Validation Rules**:
+- Tags must be non-empty strings
+- Leading/trailing whitespace is trimmed
+- Tags containing only whitespace are rejected
+- Maximum tag length: 50 characters
+- Tags must not contain commas (reserved for potential future CLI shorthand)
+
+---
+
+### FR-17: CLI Tag Management (tag command)
+
+**Description**: A CLI command to add, remove, and list tags on repositories, as well as list all tags globally and eliminate a tag from all repositories.
+
+**Command**: `gitter tag [query]`
+
+**Subcommands / Options**:
+
+| Invocation | Behavior |
+|-----------|----------|
+| `gitter tag <query>` | List all tags assigned to the matched repository |
+| `gitter tag <query> --add <tag1> [tag2 ...]` | Add one or more tags to the matched repository. Duplicates (case-insensitive) are silently skipped. |
+| `gitter tag <query> --remove <tag1> [tag2 ...]` | Remove one or more tags from the matched repository. Non-existent tags are silently skipped. |
+| `gitter tag --all` | List every distinct tag across all repositories with per-tag repo count |
+| `gitter tag --eliminate <tag>` | Remove the specified tag from every repository that has it (with confirmation prompt) |
+
+**Behavior**:
+- Repository resolution follows the standard `resolveEntry` pattern (query or CWD detection, interactive selection on ambiguity)
+- Registry mutations use load -> find -> mutate -> save (atomic) pattern
+- Interactive output goes to stderr; list output goes to stdout
+- Confirmation prompt before `--eliminate` using `@inquirer/prompts` with `{ output: process.stderr }`
+
+---
+
+### FR-18: Tag Preservation in Scan
+
+**Description**: When `gitter scan` re-scans and updates a repository entry, existing tags must be carried over to the updated entry. This is consistent with how `description`, `notes`, and `claudeSessions` are preserved.
+
+**Command**: `gitter scan` (existing command, extended)
+
+---
+
+### FR-19: Tag Display in Info Command
+
+**Description**: The `gitter info <query>` command displays the repository's tags when present.
+
+**Command**: `gitter info <query>` (existing command, extended)
+
+**Behavior**:
+- Show tags as a comma-separated list after the "Last Updated" line
+- When no tags exist, display: "Tags: (none -- run 'gitter tag' to add)"
+
+---
+
+### FR-20: Web UI Tag Display
+
+**Description**: The web UI shows each repository's tags as visual badges/chips in the repository list cards and in the detail view.
+
+**Behavior**:
+- Tags appear as styled badges on each repo card in the list view
+- Detail view shows all tags with individual remove ("x") buttons
+- Detail view includes an input field and button to add new tags to the repo
+- Tag mutations via the UI are persisted through API calls and survive page reload
+
+---
+
+### FR-21: Web UI Tag Filtering
+
+**Description**: The web UI provides a tag filter control that lets the user select one or more tags to narrow the repository list.
+
+**Behavior**:
+- Available tags appear as clickable chips in the header/toolbar area
+- Clicking a tag chip filters the list to show only repos with that tag
+- Multiple tags can be selected simultaneously (OR logic: show repos matching ANY selected tag)
+- Clearing tag selection shows all repos
+- Tag chips display repo count (e.g., "backend (3)")
+- Tag filter composes with existing text search and toggle filters (AND logic between filter categories)
+
+---
+
+### FR-22: Web UI Tag Elimination
+
+**Description**: The web UI provides a way to eliminate a tag from all repositories globally.
+
+**Behavior**:
+- A confirmation dialog appears before elimination proceeds
+- After elimination, the tag disappears from all repo cards and the filter bar
+- The change persists (verified by page reload or CLI)
+
+---
+
+### FR-23: Tag API Endpoints
+
+**Description**: The HTTP server exposes REST endpoints to support tag mutations from the web UI.
+
+**Endpoints**:
+
+| Endpoint | Method | Request Body | Response |
+|---------|--------|-------------|----------|
+| `GET /api/tags` | GET | -- | `{ tags: [{ name: string, count: number }] }` |
+| `POST /api/tags/add` | POST | `{ localPath: string, tags: string[] }` | `{ success: true, tags: string[] }` |
+| `POST /api/tags/remove` | POST | `{ localPath: string, tags: string[] }` | `{ success: true, tags: string[] }` |
+| `POST /api/tags/eliminate` | POST | `{ tag: string }` | `{ success: true, affected: number }` |
+
+**Behavior**:
+- Follows existing Node.js built-in HTTP server pattern (no Express)
+- POST body parsed manually from request stream
+- Tag validation applied on all mutation endpoints
+- Error responses: 400 for invalid input, 404 for entry not found, 500 for server errors
+
+---
+
 ## Feature Summary Table
 
 | Feature | Command | Status |
@@ -273,6 +388,14 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 | Show Stored Description | `gitter describe --show` | Planned |
 | Description in Info | `gitter info` (extended) | Planned |
 | AI Configuration | (internal) | Planned |
+| Tag Data Model | (internal) | Planned |
+| CLI Tag Management | `gitter tag [query]` | Planned |
+| Tag Preservation in Scan | `gitter scan` (extended) | Planned |
+| Tag Display in Info | `gitter info` (extended) | Planned |
+| Web UI Tag Display | (web UI) | Planned |
+| Web UI Tag Filtering | (web UI) | Planned |
+| Web UI Tag Elimination | (web UI) | Planned |
+| Tag API Endpoints | (HTTP server) | Planned |
 
 ---
 
@@ -291,6 +414,12 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 - Batch description generation across multiple repos
 - AI cost estimation before API call
 - Support for non-Claude AI providers (OpenAI, etc.)
+- Tag hierarchies or nested tags (tags are flat strings)
+- Tag metadata (descriptions, colors, creation dates)
+- Auto-tagging or AI-suggested tags
+- Tag-based search in the `search` command (future enhancement)
+- Tag import/export as a standalone operation
+- Tag rename across all repos (future enhancement)
 
 ---
 

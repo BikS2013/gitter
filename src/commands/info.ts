@@ -107,6 +107,31 @@ export async function infoCommand(query: string): Promise<void> {
     console.log(`${pc.bold('Description:')} (none -- run 'gitter describe' to generate)`);
   }
 
+  // Tags section
+  console.log();
+  if (entry.tags && entry.tags.length > 0) {
+    console.log(pc.bold('--- Tags ---'));
+    console.log('  ' + entry.tags.map(t => pc.cyan(t)).join(', '));
+  } else {
+    console.log(`${pc.bold('Tags:')} (none -- run 'gitter tag --add <tag>' to add)`);
+  }
+
+  // Claude Sessions section
+  console.log();
+  if (entry.claudeSessions && entry.claudeSessions.length > 0) {
+    console.log(pc.bold('--- Claude Sessions ---'));
+    const sorted = [...entry.claudeSessions].sort(
+      (a, b) => new Date(a.collectedAt).getTime() - new Date(b.collectedAt).getTime(),
+    );
+    for (const session of sorted) {
+      const date = new Date(session.collectedAt);
+      const formatted = date.toLocaleString();
+      console.log(`  ${pc.cyan(session.sessionId)}  ${pc.dim(formatted)}`);
+    }
+  } else {
+    console.log(`${pc.bold('Claude Sessions:')} (none -- run 'gitter remember-claude' to save)`);
+  }
+
   // Notes section
   console.log();
   if (entry.notes) {

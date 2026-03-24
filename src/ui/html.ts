@@ -194,6 +194,51 @@ export function getHtmlPage(): string {
   .md-content a:hover { text-decoration: underline; }
   .muted { color: var(--text-muted); font-style: italic; }
 
+  /* --- TAG BADGES & FILTER --- */
+  .tag-badge {
+    display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    background: #e8f5e9; color: #2e7d32; font-family: var(--mono-font);
+    cursor: pointer;
+  }
+  .tag-badge:hover { background: #c8e6c9; }
+
+  #tag-filter-bar {
+    display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 0 4px;
+    max-height: 60px; overflow-y: auto;
+  }
+  .tag-chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 12px;
+    background: var(--tag-bg); color: var(--tag-text); cursor: pointer;
+    border: 1px solid transparent; transition: all 0.15s;
+    font-family: var(--mono-font);
+  }
+  .tag-chip:hover { border-color: var(--tag-text); }
+  .tag-chip.active { background: var(--tag-text); color: #fff; }
+
+  .tag-input-row { display: flex; gap: 6px; margin-top: 8px; }
+  .tag-input {
+    flex: 1; padding: 4px 8px; border: 1px solid var(--border-color);
+    border-radius: 4px; font-size: 13px; font-family: var(--mono-font);
+    background: var(--card-bg); color: var(--text-primary);
+  }
+  .tag-add-btn, .tag-remove-btn, .tag-eliminate-btn {
+    padding: 3px 10px; border: none; border-radius: 4px;
+    font-size: 12px; cursor: pointer; transition: background 0.15s;
+  }
+  .tag-add-btn { background: #2e7d32; color: #fff; }
+  .tag-add-btn:hover { background: #1b5e20; }
+  .tag-remove-btn { background: #c62828; color: #fff; font-size: 10px; padding: 1px 4px; border-radius: 3px; margin-left: 4px; }
+  .tag-remove-btn:hover { background: #b71c1c; }
+  .tag-eliminate-btn { background: #e65100; color: #fff; margin-top: 8px; }
+  .tag-eliminate-btn:hover { background: #bf360c; }
+  .tag-eliminate-x:hover { opacity: 1 !important; color: #e74c3c; }
+
+  .detail-tag-badge {
+    display: inline-flex; align-items: center;
+    padding: 3px 10px; margin: 2px 4px; border-radius: 12px;
+    font-size: 0.8rem; background: var(--tag-bg); color: var(--tag-text);
+  }
+
   /* Loading & Error */
   .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 16px; }
   .error-msg { color: #c0392b; background: #fdecea; padding: 12px 16px; border-radius: 6px; font-size: 14px; }
@@ -222,6 +267,9 @@ export function getHtmlPage(): string {
     <button class="filter-btn" data-filter="hasNotes" title="Show only repos with notes">Has Notes</button>
     <button class="filter-btn" data-filter="noNotes" title="Show only repos without notes">No Notes</button>
     <div class="divider"></div>
+    <button class="filter-btn" data-filter="hasTags" title="Show only repos with tags">Has Tags</button>
+    <button class="filter-btn" data-filter="noTags" title="Show only repos without tags">No Tags</button>
+    <div class="divider"></div>
     <button class="sort-btn active" data-sort="repoName">Name <span class="arrow">&#9650;</span></button>
     <button class="sort-btn" data-sort="lastUpdated">Updated <span class="arrow">&#9650;</span></button>
     <button class="sort-btn" data-sort="localPath">Path <span class="arrow">&#9650;</span></button>
@@ -248,7 +296,9 @@ export function getHtmlPage(): string {
     searchQuery: '',
     sortField: 'repoName',
     sortDir: 'asc',
-    filters: { hasDesc: false, noDesc: false, hasNotes: false, noNotes: false }
+    filters: { hasDesc: false, noDesc: false, hasNotes: false, noNotes: false, hasTags: false, noTags: false },
+    selectedTags: [],
+    availableTags: []
   };
 
   // --- Markdown Renderer ---
@@ -325,6 +375,100 @@ export function getHtmlPage(): string {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // --- Tag helpers ---
+  function computeAvailableTags() {
+    var tagMap = {};
+    state.repos.forEach(function(r) {
+      if (r.tags) r.tags.forEach(function(t) {
+        tagMap[t] = (tagMap[t] || 0) + 1;
+      });
+    });
+    state.availableTags = Object.keys(tagMap).sort().map(function(t) {
+      return { name: t, count: tagMap[t] };
+    });
+  }
+
+  function apiCall(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function(res) {
+      if (!res.ok) return res.json().then(function(e) { throw new Error(e.error || 'Request failed'); });
+      return res.json();
+    });
+  }
+
+  function toggleTagFilter(tag) {
+    var index = state.selectedTags.indexOf(tag);
+    if (index === -1) {
+      state.selectedTags.push(tag);
+    } else {
+      state.selectedTags.splice(index, 1);
+    }
+    applyFilters();
+    renderList();
+  }
+
+  function clearTagFilters() {
+    state.selectedTags = [];
+    applyFilters();
+    renderList();
+  }
+
+  function addTagToRepo(localPath) {
+    var input = document.getElementById('new-tag-input');
+    var tag = input.value.trim();
+    if (!tag) return;
+    apiCall('/api/tags/add', { localPath: localPath, tags: [tag] })
+      .then(function() {
+        input.value = '';
+        refreshAfterTagChange(localPath);
+      })
+      .catch(function(err) { alert(err.message); });
+  }
+
+  function removeTagFromRepo(localPath, tag) {
+    apiCall('/api/tags/remove', { localPath: localPath, tags: [tag] })
+      .then(function() {
+        refreshAfterTagChange(localPath);
+      })
+      .catch(function(err) { alert(err.message); });
+  }
+
+  function eliminateTag(tagName) {
+    if (!confirm('Remove tag "' + tagName + '" from ALL repositories?')) return;
+    apiCall('/api/tags/eliminate', { tag: tagName })
+      .then(function() {
+        state.selectedTags = state.selectedTags.filter(function(t) { return t !== tagName; });
+        var selectedPath = state.selected ? state.selected.localPath : null;
+        refreshAfterTagChange(selectedPath);
+      })
+      .catch(function(err) { alert(err.message); });
+  }
+
+  function refreshAfterTagChange(selectedPath) {
+    fetch('/api/registry')
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(data) {
+        state.repos = data.repositories || data || [];
+        computeAvailableTags();
+        applyFilters();
+        renderList();
+        if (selectedPath) {
+          var updated = state.repos.find(function(r) { return r.localPath === selectedPath; });
+          if (updated) {
+            state.selected = updated;
+            renderList();
+            renderDetail();
+          }
+        }
+      });
+  }
+
   // --- Data fetching ---
   function fetchRegistry() {
     fetch('/api/registry')
@@ -334,6 +478,7 @@ export function getHtmlPage(): string {
       })
       .then(function(data) {
         state.repos = data.repositories || data || [];
+        computeAvailableTags();
         applyFilters();
         renderList();
       })
@@ -366,6 +511,18 @@ export function getHtmlPage(): string {
     if (f.noDesc) list = list.filter(function(r) { return !r.description || !r.description.businessDescription; });
     if (f.hasNotes) list = list.filter(function(r) { return r.notes; });
     if (f.noNotes) list = list.filter(function(r) { return !r.notes; });
+    if (f.hasTags) list = list.filter(function(r) { return r.tags && r.tags.length > 0; });
+    if (f.noTags) list = list.filter(function(r) { return !r.tags || r.tags.length === 0; });
+
+    // Tag filter (OR logic)
+    if (state.selectedTags.length > 0) {
+      list = list.filter(function(r) {
+        if (!r.tags || r.tags.length === 0) return false;
+        return state.selectedTags.some(function(st) {
+          return r.tags.indexOf(st) >= 0;
+        });
+      });
+    }
 
     // Sort
     const field = state.sortField;
@@ -391,7 +548,24 @@ export function getHtmlPage(): string {
       return;
     }
 
-    let html = '<div class="list-count">' + state.filtered.length + ' of ' + state.repos.length + ' repositories</div>';
+    var tagBarHtml = '';
+    if (state.availableTags.length > 0) {
+      tagBarHtml = '<div id="tag-filter-bar">';
+      state.availableTags.forEach(function(t) {
+        var isActive = state.selectedTags.indexOf(t.name) >= 0;
+        tagBarHtml += '<span class="tag-chip' + (isActive ? ' active' : '') + '" data-tag="' + escapeHtml(t.name) + '">';
+        tagBarHtml += escapeHtml(t.name) + ' <span style="opacity:0.6">(' + t.count + ')</span>';
+        tagBarHtml += ' <span class="tag-eliminate-x" data-eliminate-tag="' + escapeHtml(t.name) + '" title="Remove from all repos" style="margin-left:4px;opacity:0.5;cursor:pointer;font-size:10px">&times;</span>';
+        tagBarHtml += '</span>';
+      });
+      if (state.selectedTags.length > 0) {
+        tagBarHtml += '<span class="tag-chip" data-tag="__clear__" style="opacity:0.7">Clear</span>';
+      }
+      tagBarHtml += '</div>';
+    }
+
+    let html = tagBarHtml;
+    html += '<div class="list-count">' + state.filtered.length + ' of ' + state.repos.length + ' repositories</div>';
     state.filtered.forEach(function(repo, idx) {
       const isSelected = state.selected && state.selected.localPath === repo.localPath;
       const hasDesc = repo.description && repo.description.businessDescription;
@@ -403,18 +577,53 @@ export function getHtmlPage(): string {
       html += '<span class="branch-tag">' + escapeHtml(repo.currentBranch) + '</span>';
       if (hasDesc) html += '<span class="desc-indicator">&#9679; described</span>';
       if (hasNotes) html += '<span class="desc-indicator">&#9679; notes</span>';
+      if (repo.tags && repo.tags.length > 0) {
+        repo.tags.forEach(function(t) {
+          html += '<span class="tag-badge" data-tag="' + escapeHtml(t) + '">' + escapeHtml(t) + '</span>';
+        });
+      }
       html += '</div></div>';
     });
 
     panel.innerHTML = html;
 
-    // Click handlers
+    // Click handlers for repo cards
     panel.querySelectorAll('.repo-card').forEach(function(card) {
       card.addEventListener('click', function() {
         const idx = parseInt(card.getAttribute('data-idx'));
         state.selected = state.filtered[idx];
         renderList();
         renderDetail();
+      });
+    });
+
+    // Click handlers for tag badges on repo cards
+    panel.querySelectorAll('.tag-badge').forEach(function(badge) {
+      badge.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var tag = badge.getAttribute('data-tag');
+        if (tag) toggleTagFilter(tag);
+      });
+    });
+
+    // Click handlers for tag filter chips
+    panel.querySelectorAll('.tag-chip').forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        var tag = chip.getAttribute('data-tag');
+        if (tag === '__clear__') {
+          clearTagFilters();
+        } else if (tag) {
+          toggleTagFilter(tag);
+        }
+      });
+    });
+
+    // Click handlers for tag eliminate buttons on filter chips
+    panel.querySelectorAll('.tag-eliminate-x').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var tag = btn.getAttribute('data-eliminate-tag');
+        if (tag) eliminateTag(tag);
       });
     });
   }
@@ -498,6 +707,45 @@ export function getHtmlPage(): string {
       html += '</div>';
     }
 
+    // Tags
+    html += '<div class="detail-section">';
+    html += '<h2>Tags</h2>';
+    html += '<div class="branch-list">';
+    if (repo.tags && repo.tags.length > 0) {
+      repo.tags.forEach(function(t) {
+        html += '<span class="detail-tag-badge">' + escapeHtml(t);
+        html += ' <span class="tag-remove-btn" data-remove-tag="' + escapeHtml(t) + '" title="Remove tag">&times;</span>';
+        html += '</span>';
+      });
+    } else {
+      html += '<span class="muted">(No tags)</span>';
+    }
+    html += '</div>';
+    html += '<div class="tag-input-row">';
+    html += '<input type="text" class="tag-input" id="new-tag-input" placeholder="Add tag..." />';
+    html += '<button class="tag-add-btn" id="add-tag-btn">Add</button>';
+    html += '</div>';
+    html += '</div>';
+
+    // Claude Sessions
+    html += '<div class="detail-section">';
+    html += '<h2>Claude Sessions</h2>';
+    if (repo.claudeSessions && repo.claudeSessions.length > 0) {
+      var sessions = repo.claudeSessions.slice().sort(function(a, b) {
+        return new Date(a.collectedAt).getTime() - new Date(b.collectedAt).getTime();
+      });
+      html += '<table class="detail-table"><thead><tr><th>Session ID</th><th>Collected</th><th>Resume Command</th></tr></thead><tbody>';
+      sessions.forEach(function(s) {
+        html += '<tr><td>' + escapeHtml(s.sessionId) + '</td>';
+        html += '<td style="font-family:var(--sans-font)">' + formatTimestamp(s.collectedAt) + '</td>';
+        html += '<td>claude --resume ' + escapeHtml(s.sessionId) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    } else {
+      html += '<p class="muted">(No sessions saved)</p>';
+    }
+    html += '</div>';
+
     // Notes
     html += '<div class="detail-section">';
     html += '<h2>Notes</h2>';
@@ -517,6 +765,28 @@ export function getHtmlPage(): string {
         const toast = document.getElementById('copied-toast');
         toast.classList.add('show');
         setTimeout(function() { toast.classList.remove('show'); }, 1500);
+      });
+    });
+
+    // Tag add handler
+    var addTagBtn = document.getElementById('add-tag-btn');
+    var tagInput = document.getElementById('new-tag-input');
+    if (addTagBtn) {
+      addTagBtn.addEventListener('click', function() {
+        addTagToRepo(repo.localPath);
+      });
+    }
+    if (tagInput) {
+      tagInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') addTagToRepo(repo.localPath);
+      });
+    }
+
+    // Tag remove handlers
+    panel.querySelectorAll('.tag-remove-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var tag = btn.getAttribute('data-remove-tag');
+        if (tag) removeTagFromRepo(repo.localPath, tag);
       });
     });
   }
@@ -560,6 +830,12 @@ export function getHtmlPage(): string {
       } else if (key === 'noNotes' && state.filters.noNotes) {
         state.filters.hasNotes = false;
         document.querySelector('[data-filter="hasNotes"]').classList.remove('active');
+      } else if (key === 'hasTags' && state.filters.hasTags) {
+        state.filters.noTags = false;
+        document.querySelector('[data-filter="noTags"]').classList.remove('active');
+      } else if (key === 'noTags' && state.filters.noTags) {
+        state.filters.hasTags = false;
+        document.querySelector('[data-filter="hasTags"]').classList.remove('active');
       }
       applyFilters();
       renderList();

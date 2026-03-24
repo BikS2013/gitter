@@ -12,6 +12,8 @@ import { describeCommand } from './commands/describe.js';
 import { renameCommand } from './commands/rename.js';
 import { notesCommand } from './commands/notes.js';
 import { uiCommand } from './commands/ui.js';
+import { rememberClaudeCommand } from './commands/remember-claude.js';
+import { tagCommand } from './commands/tag.js';
 import { isInsideGitRepo } from './git.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -86,6 +88,22 @@ program
   .option('--port <n>', 'Port number for the web server', '3000')
   .option('--no-open', 'Do not automatically open the browser')
   .action(uiCommand);
+
+program
+  .command('remember-claude [session-id]')
+  .description('Save a Claude Code session ID for this repository')
+  .option('--list', 'List all stored Claude sessions')
+  .option('--clear', 'Remove all stored Claude sessions')
+  .action(rememberClaudeCommand);
+
+program
+  .command('tag [query]')
+  .description('Manage tags for a repository')
+  .option('--add <tags...>', 'Add tags to the repository')
+  .option('--remove <tags...>', 'Remove tags from the repository')
+  .option('--list', 'List all tags used across all repositories')
+  .option('--eliminate <tag>', 'Remove a tag from all repositories')
+  .action(tagCommand);
 
 // Default action: no subcommand provided
 program.action(async () => {

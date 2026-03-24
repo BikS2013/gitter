@@ -33,6 +33,20 @@ export interface RegistryEntry {
   description?: RepoDescription;
   /** User notes in markdown format (optional, populated by notes command) */
   notes?: string;
+  /** Saved Claude Code session IDs for this repository */
+  claudeSessions?: ClaudeSession[];
+  /** User-defined tags for categorizing/filtering repositories */
+  tags?: string[];
+}
+
+/**
+ * A saved Claude Code session ID with its collection timestamp.
+ */
+export interface ClaudeSession {
+  /** The session UUID (used with `claude --resume <id>`) */
+  sessionId: string;
+  /** ISO 8601 timestamp of when this session was last collected/updated */
+  collectedAt: string;
 }
 
 /**

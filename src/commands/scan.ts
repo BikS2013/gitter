@@ -32,6 +32,12 @@ export async function scanCommand(): Promise<void> {
   if (existing?.notes) {
     metadata.notes = existing.notes;
   }
+  if (existing?.claudeSessions) {
+    metadata.claudeSessions = existing.claudeSessions;
+  }
+  if (existing?.tags) {
+    metadata.tags = existing.tags;
+  }
 
   addOrUpdate(registry, metadata);
   saveRegistry(registry);

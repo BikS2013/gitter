@@ -2685,3 +2685,1318 @@ Runtime artifacts:
 | `src/commands/list.ts` | No description interaction |
 | `src/commands/remove.ts` | Removing an entry removes its description automatically |
 | `src/commands/init.ts` | Shell function unchanged |
+
+---
+
+## 11. Repository Tagging Feature
+
+### 11.1 Feature Overview
+
+The `gitter tag` command adds a tagging system that allows users to attach arbitrary text tags to registered repositories, enabling categorization, filtering, and discovery. Tags are manageable through both the CLI and the web UI, including the ability to globally purge a tag from all repositories at once.
+
+**Reference Documents**:
+- Requirements: `docs/reference/refined-request-tag-feature.md`
+- Implementation Plan: `docs/design/plan-004-tag-feature.md`
+- Codebase Analysis: `docs/reference/codebase-scan-tag-feature.md`
+
+---
+
+### 11.2 Data Model
+
+#### 11.2.1 RegistryEntry Extension
+
+The `RegistryEntry` interface in `src/types.ts` is extended with an optional `tags` field. The registry schema version remains `1` since the new field is optional and fully backward-compatible.
+
+```typescript
+export interface RegistryEntry {
+  // ... all existing fields unchanged ...
+
+  /** Saved Claude Code session IDs for this repository */
+  claudeSessions?: ClaudeSession[];
+  /** User-assigned tags for categorization */
+  tags?: string[];
+}
+```
+
+The `tags` field is placed after `claudeSessions`, following the chronological order in which optional fields were added to the interface.
+
+**Impact on Existing Code**:
+- `loadRegistry()` and `saveRegistry()` require no changes -- they serialize/deserialize the full object graph via `JSON.parse`/`JSON.stringify`.
+- `addOrUpdate()` replaces the full entry by `localPath`. Since `collectRepoMetadata()` does not produce a `tags` field, re-scanning would lose the tags. This is mitigated in `scan.ts` (see Section 11.5.2).
+- No registry version bump is needed since the field is optional.
+
+#### 11.2.2 Tag Validation Rules
+
+All tag validation is enforced by a `validateTag()` function (defined in `src/commands/tag.ts` and reused by `src/ui/server.ts`).
+
+| Rule | Description | Error Message |
+|------|-------------|---------------|
+| Non-empty | Tag must contain at least one non-whitespace character after trimming | `"Tag cannot be empty"` |
+| Max length | Tag must not exceed 50 characters (after trimming) | `"Tag '...' exceeds maximum length of 50 characters"` |
+| No commas | Tag must not contain commas (reserved for future delimiter use) | `"Tag '...' must not contain commas"` |
+| Whitespace trimming | Leading and trailing whitespace is silently trimmed | N/A (not an error) |
+
+Tags are stored in the casing provided by the user. Matching and deduplication are performed case-insensitively using `.toLowerCase()`.
+
+```typescript
+/**
+ * Validate and normalize a tag string.
+ * Trims whitespace, rejects empty/whitespace-only, rejects commas, enforces 50-char max.
+ *
+ * @param tag - Raw tag string from user input
+ * @returns Trimmed tag string
+ * @throws Error if tag is invalid
+ */
+export function validateTag(tag: string): string {
+  const trimmed = tag.trim();
+  if (trimmed.length === 0) {
+    throw new Error('Tag cannot be empty');
+  }
+  if (trimmed.includes(',')) {
+    throw new Error(`Tag '${trimmed}' must not contain commas`);
+  }
+  if (trimmed.length > 50) {
+    throw new Error(`Tag '${trimmed}' exceeds maximum length of 50 characters`);
+  }
+  return trimmed;
+}
+```
+
+#### 11.2.3 Case-Insensitive Deduplication
+
+When adding tags, new tags are compared against existing tags using `.toLowerCase()`. If a match exists, the new tag is silently skipped (preserving the original casing of the existing tag). When removing tags, the comparison is also case-insensitive.
+
+```typescript
+/**
+ * Check if a tag already exists in the array (case-insensitive).
+ */
+function hasTagCaseInsensitive(tags: string[], tag: string): boolean {
+  return tags.some(t => t.toLowerCase() === tag.toLowerCase());
+}
+
+/**
+ * Add tags to an entry with case-insensitive deduplication.
+ * Modifies the entry's tags array in place.
+ */
+function addTagsToEntry(entry: RegistryEntry, newTags: string[]): void {
+  if (!entry.tags) entry.tags = [];
+  for (const tag of newTags) {
+    const validated = validateTag(tag);
+    if (!hasTagCaseInsensitive(entry.tags, validated)) {
+      entry.tags.push(validated);
+    }
+  }
+}
+
+/**
+ * Remove tags from an entry with case-insensitive matching.
+ * Modifies the entry's tags array in place.
+ */
+function removeTagsFromEntry(entry: RegistryEntry, tagsToRemove: string[]): void {
+  if (!entry.tags) return;
+  const lowered = tagsToRemove.map(t => t.toLowerCase());
+  entry.tags = entry.tags.filter(t => !lowered.includes(t.toLowerCase()));
+  if (entry.tags.length === 0) delete entry.tags;
+}
+```
+
+#### 11.2.4 Registry JSON Example (with Tags)
+
+```json
+{
+  "version": 1,
+  "repositories": [
+    {
+      "repoName": "gitter",
+      "localPath": "/Users/giorgosmarinos/aiwork/coding-platform/macbook-desktop/gitter",
+      "remotes": [
+        {
+          "name": "origin",
+          "fetchUrl": "git@github.com:user/gitter.git",
+          "pushUrl": "git@github.com:user/gitter.git"
+        }
+      ],
+      "remoteBranches": ["origin/main"],
+      "localBranches": ["main"],
+      "currentBranch": "main",
+      "lastUpdated": "2026-03-24T10:00:00.000Z",
+      "tags": ["cli-tool", "typescript", "developer-tools"]
+    }
+  ]
+}
+```
+
+---
+
+### 11.3 CLI Interface: `gitter tag`
+
+#### 11.3.1 Command Registration in `src/cli.ts`
+
+```typescript
+import { tagCommand } from './commands/tag.js';
+
+program
+  .command('tag [query]')
+  .description('Add, remove, or list tags on a repository')
+  .option('--add <tags...>', 'Add one or more tags')
+  .option('--remove <tags...>', 'Remove one or more tags')
+  .option('--list', 'List all tags across all repositories')
+  .option('--eliminate <tag>', 'Remove a tag from all repositories')
+  .action(tagCommand);
+```
+
+The command is registered after the `notes` command block and before the `ui` command, maintaining the logical grouping of metadata-manipulation commands.
+
+**Note on Commander variadic options**: Commander supports `<tags...>` syntax, which collects multiple values into an array. When the user invokes `gitter tag my-repo --add backend typescript`, Commander passes `options.add` as `['backend', 'typescript']`.
+
+#### 11.3.2 Command Options Interface
+
+```typescript
+interface TagCmdOptions {
+  add?: string[];
+  remove?: string[];
+  list?: boolean;
+  eliminate?: string;
+}
+```
+
+#### 11.3.3 Subcommand Behavior Matrix
+
+| Invocation | Behavior | Requires Query |
+|-----------|----------|:--------------:|
+| `gitter tag <query>` | List tags for matched repo | Yes |
+| `gitter tag <query> --add <tags...>` | Add tags to matched repo | Yes |
+| `gitter tag <query> --remove <tags...>` | Remove tags from matched repo | Yes |
+| `gitter tag --list` | List all distinct tags globally with repo counts | No |
+| `gitter tag --eliminate <tag>` | Remove tag from all repos (with confirmation) | No |
+
+#### 11.3.4 Handler: `tagCommand(query, options)`
+
+```typescript
+/**
+ * Handler for `gitter tag [query]` command.
+ * Routes to the appropriate sub-operation based on options.
+ *
+ * @param query - Optional repo search string
+ * @param options - Command options (add, remove, list, eliminate)
+ */
+export async function tagCommand(
+  query: string | undefined,
+  options: TagCmdOptions
+): Promise<void>;
+```
+
+**Routing Logic**:
+
+```
+IF options.list:
+    globalListTags()
+ELSE IF options.eliminate:
+    globalEliminateTag(options.eliminate)
+ELSE IF options.add:
+    entry = resolveEntry(query)
+    addTagsToEntry(entry, options.add)
+    save registry
+    display updated tags
+ELSE IF options.remove:
+    entry = resolveEntry(query)
+    removeTagsFromEntry(entry, options.remove)
+    save registry
+    display updated tags
+ELSE:
+    entry = resolveEntry(query)
+    display entry's tags (or "no tags" message)
+```
+
+#### 11.3.5 Global List Tags (`--list`)
+
+Iterates all registry entries, collects tags into a `Map<string, { display: string, count: number }>` keyed by lowercase tag name, then displays using `cli-table3`.
+
+```typescript
+function globalListTags(): void {
+  const registry = loadRegistry();
+  const tagMap = new Map<string, { display: string; count: number }>();
+
+  for (const entry of registry.repositories) {
+    if (!entry.tags) continue;
+    for (const tag of entry.tags) {
+      const key = tag.toLowerCase();
+      const existing = tagMap.get(key);
+      if (existing) {
+        existing.count++;
+      } else {
+        tagMap.set(key, { display: tag, count: 1 });
+      }
+    }
+  }
+
+  if (tagMap.size === 0) {
+    console.log('No tags found in any repository.');
+    return;
+  }
+
+  // Sort alphabetically by tag name
+  const sorted = [...tagMap.values()].sort((a, b) =>
+    a.display.toLowerCase().localeCompare(b.display.toLowerCase())
+  );
+
+  // Display in a cli-table3 table with columns: Tag, Repos
+  const table = new Table({ head: ['Tag', 'Repos'] });
+  for (const { display, count } of sorted) {
+    table.push([display, count]);
+  }
+  console.log(table.toString());
+}
+```
+
+**Output**: Goes to stdout (consistent with `list` and `search` commands).
+
+#### 11.3.6 Global Eliminate Tag (`--eliminate`)
+
+```typescript
+async function globalEliminateTag(tag: string): Promise<void> {
+  const registry = loadRegistry();
+  const target = tag.toLowerCase();
+
+  // Find all entries with this tag
+  const affected = registry.repositories.filter(
+    e => e.tags?.some(t => t.toLowerCase() === target)
+  );
+
+  if (affected.length === 0) {
+    process.stderr.write(`Tag '${tag}' not found in any repository.\n`);
+    return;
+  }
+
+  // Prompt for confirmation
+  const yes = await confirm({
+    message: `Remove tag '${tag}' from ${affected.length} repositor${affected.length === 1 ? 'y' : 'ies'}?`,
+  }, { output: process.stderr });
+
+  if (!yes) {
+    console.log('Cancelled.');
+    return;
+  }
+
+  // Remove from all affected entries
+  for (const entry of affected) {
+    entry.tags = entry.tags!.filter(t => t.toLowerCase() !== target);
+    if (entry.tags.length === 0) delete entry.tags;
+  }
+
+  saveRegistry(registry);
+  console.log(`Tag '${tag}' removed from ${affected.length} repositor${affected.length === 1 ? 'y' : 'ies'}.`);
+}
+```
+
+#### 11.3.7 Entry Resolution Pattern
+
+The `resolveEntry` function follows the exact same pattern as `notes.ts`:
+
+1. If `query` is provided: search registry, handle 0/1/N matches (interactive select on N).
+2. If no `query`: detect CWD git repo, look up in registry.
+3. `@inquirer/prompts` configured with `{ output: process.stderr }` for shell compatibility.
+
+```typescript
+async function resolveEntry(query: string | undefined): Promise<RegistryEntry> {
+  const registry = loadRegistry();
+
+  if (query) {
+    const matches = searchEntries(registry, query);
+    if (matches.length === 0) {
+      process.stderr.write(`No repositories match query: ${query}\n`);
+      process.exit(1);
+    }
+    if (matches.length === 1) return matches[0];
+    const selectedPath = await select({
+      message: 'Multiple repositories matched. Select one:',
+      choices: matches.map(e => ({
+        name: `${e.repoName} (${e.localPath})`,
+        value: e.localPath,
+      })),
+    }, { output: process.stderr });
+    return matches.find(e => e.localPath === selectedPath)!;
+  }
+
+  if (!isInsideGitRepo()) {
+    process.stderr.write(
+      'Not inside a git repository. Provide a query or run from within a registered repo.\n'
+    );
+    process.exit(1);
+  }
+
+  const repoRoot = getRepoRoot();
+  const entry = findByPath(registry, repoRoot);
+  if (!entry) {
+    process.stderr.write("Current repository is not registered. Run 'gitter scan' first.\n");
+    process.exit(1);
+  }
+  return entry;
+}
+```
+
+#### 11.3.8 stdout/stderr Discipline
+
+| Output Channel | Content |
+|----------------|---------|
+| **stdout** | Tag list output (single repo or global `--list`), confirmation messages |
+| **stderr** | Interactive prompts (inquirer select, confirm), error messages, informational messages |
+
+---
+
+### 11.4 API Endpoints (for UI Mutations)
+
+Four new endpoints are added to the `if/else if` chain in `src/ui/server.ts`.
+
+#### 11.4.1 Endpoint Specifications
+
+| Endpoint | Method | Request Body | Success Response | Error Responses |
+|---------|--------|-------------|-----------------|-----------------|
+| `GET /api/tags` | GET | -- | `{ tags: [{ name: string, count: number }] }` | 500: registry load failure |
+| `POST /api/tags/add` | POST | `{ localPath: string, tags: string[] }` | `{ success: true, tags: string[] }` | 400: invalid input; 404: entry not found |
+| `POST /api/tags/remove` | POST | `{ localPath: string, tags: string[] }` | `{ success: true, tags: string[] }` | 400: invalid input; 404: entry not found |
+| `POST /api/tags/eliminate` | POST | `{ tag: string }` | `{ success: true, affected: number }` | 400: invalid input |
+
+#### 11.4.2 POST Body Parsing Pattern
+
+Since the server uses Node.js built-in `http` module (no Express), POST request bodies are parsed from the stream:
+
+```typescript
+async function parseJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise<unknown>((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        reject(new Error('Invalid JSON body'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+```
+
+This helper is defined locally in `server.ts` and used by all three POST endpoints.
+
+#### 11.4.3 `GET /api/tags` Implementation
+
+```typescript
+// Route: GET /api/tags
+if (req.url === '/api/tags' && req.method === 'GET') {
+  try {
+    const registry = loadRegistry();
+    const tagMap = new Map<string, { name: string; count: number }>();
+
+    for (const entry of registry.repositories) {
+      if (!entry.tags) continue;
+      for (const tag of entry.tags) {
+        const key = tag.toLowerCase();
+        const existing = tagMap.get(key);
+        if (existing) {
+          existing.count++;
+        } else {
+          tagMap.set(key, { name: tag, count: 1 });
+        }
+      }
+    }
+
+    const tags = [...tagMap.values()].sort((a, b) =>
+      a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+    );
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ tags }));
+  } catch {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to load registry' }));
+  }
+}
+```
+
+#### 11.4.4 `POST /api/tags/add` Implementation
+
+```typescript
+// Route: POST /api/tags/add
+if (req.url === '/api/tags/add' && req.method === 'POST') {
+  try {
+    const body = await parseJsonBody(req) as { localPath?: string; tags?: string[] };
+
+    if (!body.localPath || !Array.isArray(body.tags) || body.tags.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing localPath or tags array' }));
+      return;
+    }
+
+    // Validate each tag
+    const validatedTags: string[] = [];
+    for (const tag of body.tags) {
+      try {
+        validatedTags.push(validateTag(tag));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: (err as Error).message }));
+        return;
+      }
+    }
+
+    const registry = loadRegistry();
+    const entry = findByPath(registry, body.localPath);
+    if (!entry) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Repository not found' }));
+      return;
+    }
+
+    // Add tags with case-insensitive deduplication
+    if (!entry.tags) entry.tags = [];
+    for (const tag of validatedTags) {
+      if (!entry.tags.some(t => t.toLowerCase() === tag.toLowerCase())) {
+        entry.tags.push(tag);
+      }
+    }
+
+    saveRegistry(registry);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, tags: entry.tags }));
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid request body' }));
+  }
+}
+```
+
+#### 11.4.5 `POST /api/tags/remove` Implementation
+
+```typescript
+// Route: POST /api/tags/remove
+if (req.url === '/api/tags/remove' && req.method === 'POST') {
+  try {
+    const body = await parseJsonBody(req) as { localPath?: string; tags?: string[] };
+
+    if (!body.localPath || !Array.isArray(body.tags) || body.tags.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing localPath or tags array' }));
+      return;
+    }
+
+    const registry = loadRegistry();
+    const entry = findByPath(registry, body.localPath);
+    if (!entry) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Repository not found' }));
+      return;
+    }
+
+    // Remove tags with case-insensitive matching
+    if (entry.tags) {
+      const lowered = body.tags.map(t => t.toLowerCase());
+      entry.tags = entry.tags.filter(t => !lowered.includes(t.toLowerCase()));
+      if (entry.tags.length === 0) delete entry.tags;
+    }
+
+    saveRegistry(registry);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, tags: entry.tags ?? [] }));
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid request body' }));
+  }
+}
+```
+
+#### 11.4.6 `POST /api/tags/eliminate` Implementation
+
+```typescript
+// Route: POST /api/tags/eliminate
+if (req.url === '/api/tags/eliminate' && req.method === 'POST') {
+  try {
+    const body = await parseJsonBody(req) as { tag?: string };
+
+    if (!body.tag || typeof body.tag !== 'string') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing tag field' }));
+      return;
+    }
+
+    const registry = loadRegistry();
+    const target = body.tag.toLowerCase();
+    let affected = 0;
+
+    for (const entry of registry.repositories) {
+      if (!entry.tags) continue;
+      const before = entry.tags.length;
+      entry.tags = entry.tags.filter(t => t.toLowerCase() !== target);
+      if (entry.tags.length < before) affected++;
+      if (entry.tags.length === 0) delete entry.tags;
+    }
+
+    saveRegistry(registry);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, affected }));
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid request body' }));
+  }
+}
+```
+
+#### 11.4.7 Tag Validation in Server
+
+The `validateTag()` function from `src/commands/tag.ts` is imported into `src/ui/server.ts` for consistent validation across CLI and API. The import is:
+
+```typescript
+import { validateTag } from '../commands/tag.js';
+```
+
+This avoids duplicating the validation logic while keeping it trivial to maintain.
+
+#### 11.4.8 CORS
+
+Not needed. The UI is served from the same origin (same HTTP server), so same-origin policy applies and no CORS headers are required.
+
+---
+
+### 11.5 Modifications to Existing Commands
+
+#### 11.5.1 `src/commands/info.ts` -- Display Tags
+
+A tags section is added to the info output, placed between the "Last Updated" line and the "Description" section. This placement groups all user-managed metadata (notes, tags) together.
+
+```typescript
+// Tags section (after Last Updated, before Description)
+if (entry.tags && entry.tags.length > 0) {
+  console.log(`${pc.bold('Tags:')}            ${entry.tags.map(t => pc.cyan(t)).join(', ')}`);
+} else {
+  console.log(`${pc.bold('Tags:')}            (none -- run 'gitter tag' to add)`);
+}
+```
+
+Tags are displayed in cyan and comma-separated. When no tags exist, a hint message directs the user to the `tag` command.
+
+#### 11.5.2 `src/commands/scan.ts` -- Preserve Tags
+
+One line is added to the existing field preservation block, following the exact pattern used for `description`, `notes`, and `claudeSessions`:
+
+```typescript
+// Existing preservation block:
+if (existing?.description) metadata.description = existing.description;
+if (existing?.notes) metadata.notes = existing.notes;
+if (existing?.claudeSessions) metadata.claudeSessions = existing.claudeSessions;
+// NEW: Preserve tags
+if (existing?.tags) metadata.tags = existing.tags;
+```
+
+This ensures that running `gitter scan` inside a tagged repo does not lose its tags.
+
+---
+
+### 11.6 UI Changes (`src/ui/html.ts`)
+
+The web UI is a single-page HTML app served as a template literal from `src/ui/html.ts`. All UI changes are made within this file's template literal.
+
+#### 11.6.1 State Object Extension
+
+The state object (currently at line 244 of `html.ts`) is extended with tag-related state:
+
+```javascript
+const state = {
+  repos: [],
+  filtered: [],
+  selected: null,
+  searchQuery: '',
+  sortField: 'repoName',
+  sortDir: 'asc',
+  filters: { hasDesc: false, noDesc: false, hasNotes: false, noNotes: false },
+  // NEW: Tag filtering state
+  selectedTags: [],     // Array of lowercase tag strings currently selected for filtering
+  availableTags: [],    // Array of { name: string, count: number } for the filter UI
+};
+```
+
+#### 11.6.2 Tag Badges in Repo Cards (renderList)
+
+In the `renderList()` function, after existing repo-meta indicators (description, notes badges), tags are rendered as inline badges:
+
+```html
+<!-- Inside each repo card's .repo-meta div -->
+${repo.tags ? repo.tags.map(t =>
+  `<span class="tag-badge" data-tag="${t.toLowerCase()}"
+         onclick="event.stopPropagation(); toggleTagFilter('${t.toLowerCase()}')"
+   >${t}</span>`
+).join('') : ''}
+```
+
+Clicking a tag badge on a repo card toggles the tag filter (same behavior as clicking in the filter bar).
+
+#### 11.6.3 CSS for Tag Badges
+
+The existing CSS already defines `--tag-bg` and `--tag-text` CSS variables (lines 30-31 of `html.ts`). The tag badge styles use these:
+
+```css
+.tag-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 1px 3px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  background: var(--tag-bg);
+  color: var(--tag-text);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.tag-badge:hover {
+  opacity: 0.8;
+}
+
+.tag-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 0.8rem;
+  background: var(--tag-bg);
+  color: var(--tag-text);
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+
+.tag-chip.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.tag-chip .tag-count {
+  margin-left: 4px;
+  opacity: 0.7;
+  font-size: 0.7rem;
+}
+
+.tag-chip .tag-eliminate {
+  margin-left: 6px;
+  font-size: 0.65rem;
+  opacity: 0.5;
+  cursor: pointer;
+}
+
+.tag-chip .tag-eliminate:hover {
+  opacity: 1;
+  color: #e74c3c;
+}
+
+.tag-input-group {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.tag-input-group input {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  flex: 1;
+}
+
+.tag-input-group button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.detail-tag-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  margin: 2px 4px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  background: var(--tag-bg);
+  color: var(--tag-text);
+}
+
+.detail-tag-badge .remove-tag {
+  margin-left: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  opacity: 0.6;
+}
+
+.detail-tag-badge .remove-tag:hover {
+  opacity: 1;
+  color: #e74c3c;
+}
+```
+
+#### 11.6.4 Tag Filter Bar in Header
+
+A collapsible tag filter section is added below the existing filter buttons in the header/toolbar area. This avoids overcrowding the existing button row.
+
+```html
+<!-- Tag filter bar (below existing filter buttons) -->
+<div class="tag-filter-bar" id="tagFilterBar">
+  <!-- Populated dynamically by renderTagFilters() -->
+</div>
+```
+
+**`renderTagFilters()` function**:
+
+```javascript
+function renderTagFilters() {
+  const bar = document.getElementById('tagFilterBar');
+  if (state.availableTags.length === 0) {
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.innerHTML = state.availableTags.map(tag =>
+    `<span class="tag-chip ${state.selectedTags.includes(tag.name.toLowerCase()) ? 'active' : ''}"
+           onclick="toggleTagFilter('${tag.name.toLowerCase()}')"
+     >${tag.name}<span class="tag-count">(${tag.count})</span>` +
+     `<span class="tag-eliminate" onclick="event.stopPropagation(); eliminateTag('${tag.name}')"
+            title="Remove from all repos">x</span>` +
+     `</span>`
+  ).join('') +
+  (state.selectedTags.length > 0
+    ? '<span class="tag-chip" onclick="clearTagFilters()" style="opacity:0.7">Clear</span>'
+    : '');
+}
+```
+
+#### 11.6.5 Tag Filtering Logic (applyFilters)
+
+Tag filtering is added as an additional filter stage in the existing `applyFilters()` function, after the existing text search and toggle filter stages. Tag filtering uses OR logic: a repo is shown if it has at least one of the selected tags.
+
+```javascript
+// Inside applyFilters(), after existing filter stages:
+
+// Tag filter (OR logic: show repos matching ANY selected tag)
+if (state.selectedTags.length > 0) {
+  filtered = filtered.filter(repo => {
+    if (!repo.tags || repo.tags.length === 0) return false;
+    return repo.tags.some(t => state.selectedTags.includes(t.toLowerCase()));
+  });
+}
+```
+
+Tag filter composes as AND with other filters: the result set from text search and toggle filters is further narrowed by the tag filter. This is consistent with how existing filters compose.
+
+**`toggleTagFilter()` function**:
+
+```javascript
+function toggleTagFilter(tag) {
+  const index = state.selectedTags.indexOf(tag);
+  if (index === -1) {
+    state.selectedTags.push(tag);
+  } else {
+    state.selectedTags.splice(index, 1);
+  }
+  applyFilters();
+  renderTagFilters();
+}
+
+function clearTagFilters() {
+  state.selectedTags = [];
+  applyFilters();
+  renderTagFilters();
+}
+```
+
+#### 11.6.6 Available Tags Computation
+
+After `fetchRegistry()` completes and populates `state.repos`, the available tags are computed client-side from the loaded data (no separate API call needed, since the data is already present):
+
+```javascript
+function computeAvailableTags() {
+  const tagMap = new Map();
+  for (const repo of state.repos) {
+    if (!repo.tags) continue;
+    for (const tag of repo.tags) {
+      const key = tag.toLowerCase();
+      const existing = tagMap.get(key);
+      if (existing) {
+        existing.count++;
+      } else {
+        tagMap.set(key, { name: tag, count: 1 });
+      }
+    }
+  }
+  state.availableTags = [...tagMap.values()].sort((a, b) =>
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+  );
+}
+```
+
+This function is called immediately after `state.repos` is updated in `fetchRegistry()`:
+
+```javascript
+async function fetchRegistry() {
+  const res = await fetch('/api/registry');
+  const data = await res.json();
+  state.repos = data.repositories;
+  computeAvailableTags();   // <-- NEW
+  applyFilters();
+  renderTagFilters();       // <-- NEW
+}
+```
+
+#### 11.6.7 Tag Management in Detail View (renderDetail)
+
+In the `renderDetail()` function, a "Tags" section is added showing all tags as removable badges with an add-tag input:
+
+```html
+<!-- Tags section in detail view -->
+<div class="detail-section">
+  <h3>Tags</h3>
+  <div id="detailTags">
+    ${(repo.tags || []).map(t =>
+      `<span class="detail-tag-badge">${t}
+         <span class="remove-tag" onclick="removeTagFromRepo('${repo.localPath}', '${t}')"
+               title="Remove tag">x</span>
+       </span>`
+    ).join('') || '<span style="opacity:0.5">No tags</span>'}
+  </div>
+  <div class="tag-input-group">
+    <input type="text" id="newTagInput" placeholder="Add a tag..."
+           onkeydown="if(event.key==='Enter') addTagToRepo('${repo.localPath}')">
+    <button onclick="addTagToRepo('${repo.localPath}')">Add</button>
+  </div>
+</div>
+```
+
+**JavaScript functions for tag mutations**:
+
+```javascript
+async function addTagToRepo(localPath) {
+  const input = document.getElementById('newTagInput');
+  const tag = input.value.trim();
+  if (!tag) return;
+
+  const res = await fetch('/api/tags/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localPath, tags: [tag] }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    alert(err.error || 'Failed to add tag');
+    return;
+  }
+
+  input.value = '';
+  await fetchRegistry();
+  // Re-render detail view for the same repo
+  const updated = state.repos.find(r => r.localPath === localPath);
+  if (updated) renderDetail(updated);
+}
+
+async function removeTagFromRepo(localPath, tag) {
+  const res = await fetch('/api/tags/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localPath, tags: [tag] }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    alert(err.error || 'Failed to remove tag');
+    return;
+  }
+
+  await fetchRegistry();
+  const updated = state.repos.find(r => r.localPath === localPath);
+  if (updated) renderDetail(updated);
+}
+```
+
+#### 11.6.8 Tag Elimination from UI
+
+Tag elimination is triggered by clicking the "x" on a tag chip in the filter bar. A confirmation dialog is shown before proceeding:
+
+```javascript
+async function eliminateTag(tagName) {
+  if (!confirm(`Remove tag "${tagName}" from ALL repositories?`)) return;
+
+  const res = await fetch('/api/tags/eliminate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tag: tagName }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    alert(err.error || 'Failed to eliminate tag');
+    return;
+  }
+
+  const result = await res.json();
+  // Remove from selectedTags if it was selected
+  state.selectedTags = state.selectedTags.filter(t => t !== tagName.toLowerCase());
+
+  await fetchRegistry();
+  // If detail view is showing, refresh it
+  if (state.selected) {
+    const updated = state.repos.find(r => r.localPath === state.selected.localPath);
+    if (updated) renderDetail(updated);
+  }
+}
+```
+
+The browser's native `confirm()` dialog is used (consistent with the lightweight, no-external-dependencies approach of the UI).
+
+---
+
+### 11.7 Data Flow: `gitter tag my-repo --add backend typescript`
+
+```
+query "my-repo" --> registry.searchEntries()
+                       |
+                       |--> 0 matches: stderr "No match", exit(1)
+                       |--> 1 match: use that entry
+                       |--> N matches: inquirer.select() via stderr
+                       |
+                       v
+                     resolve to single RegistryEntry
+                       |
+                       v
+                     validateTag("backend") --> "backend"
+                     validateTag("typescript") --> "typescript"
+                       |
+                       v
+                     Check case-insensitive duplicates
+                       |
+                       |--> "backend" not in entry.tags --> append
+                       |--> "typescript" not in entry.tags --> append
+                       |
+                       v
+                     loadRegistry() (re-load for atomic mutation)
+                       |
+                       v
+                     findByPath(registry, entry.localPath)
+                       |
+                       v
+                     Mutate entry.tags in place
+                       |
+                       v
+                     saveRegistry(registry) [atomic write]
+                       |
+                       v
+                     Print: "Tags for my-repo: backend, typescript"
+```
+
+### 11.8 Data Flow: UI Tag Add via API
+
+```
+User types "frontend" in detail view input --> clicks "Add"
+       |
+       v
+fetch('/api/tags/add', { localPath, tags: ['frontend'] })
+       |
+       v
+Server: parseJsonBody(req)
+       |
+       v
+Server: validateTag('frontend') --> 'frontend'
+       |
+       v
+Server: loadRegistry() --> findByPath(localPath)
+       |
+       |--> 404 if not found
+       |
+       v
+Server: case-insensitive dedup check --> append if new
+       |
+       v
+Server: saveRegistry(registry) [atomic write]
+       |
+       v
+Server: respond { success: true, tags: [...] }
+       |
+       v
+Client: fetchRegistry() --> re-renders list + detail view
+```
+
+---
+
+### 11.9 Error Handling Summary
+
+| Scenario | Message | Exit Code / HTTP Status |
+|----------|---------|:-----------------------:|
+| Empty tag string | `"Tag cannot be empty"` | 1 / 400 |
+| Tag exceeds 50 characters | `"Tag '...' exceeds maximum length of 50 characters"` | 1 / 400 |
+| Tag contains comma | `"Tag '...' must not contain commas"` | 1 / 400 |
+| No search matches (CLI) | `"No repositories match query: <query>"` | 1 |
+| Tag not found in any repo (`--eliminate`) | `"Tag '<tag>' not found in any repository."` | 0 (informational) |
+| User cancels elimination | `"Cancelled."` | 0 |
+| Missing localPath or tags in API request | `"Missing localPath or tags array"` | 400 |
+| Repository not found (API) | `"Repository not found"` | 404 |
+| Invalid JSON body (API) | `"Invalid request body"` | 400 |
+| Missing tag field in eliminate request (API) | `"Missing tag field"` | 400 |
+| Registry load failure (API) | `"Failed to load registry"` | 500 |
+| Not inside git repo (no query, CLI) | `"Not inside a git repository..."` | 1 |
+| Repo not registered (no query, CLI) | `"Current repository is not registered..."` | 1 |
+
+---
+
+### 11.10 Module Design: `src/commands/tag.ts`
+
+**Purpose**: CLI tag command handler providing add, remove, list, and eliminate operations.
+
+#### Imports
+
+```typescript
+import { select, confirm } from '@inquirer/prompts';
+import pc from 'picocolors';
+import Table from 'cli-table3';
+import { loadRegistry, saveRegistry, findByPath, searchEntries } from '../registry.js';
+import { isInsideGitRepo, getRepoRoot } from '../git.js';
+import type { RegistryEntry } from '../types.js';
+```
+
+#### Exported Functions
+
+```typescript
+/**
+ * Validate and normalize a tag string.
+ * Exported for reuse by server.ts.
+ */
+export function validateTag(tag: string): string;
+
+/**
+ * Handler for `gitter tag [query]` command.
+ */
+export async function tagCommand(
+  query: string | undefined,
+  options: TagCmdOptions
+): Promise<void>;
+```
+
+#### Internal Functions
+
+```typescript
+function hasTagCaseInsensitive(tags: string[], tag: string): boolean;
+function addTagsToEntry(entry: RegistryEntry, newTags: string[]): void;
+function removeTagsFromEntry(entry: RegistryEntry, tagsToRemove: string[]): void;
+async function resolveEntry(query: string | undefined): Promise<RegistryEntry>;
+function globalListTags(): void;
+async function globalEliminateTag(tag: string): Promise<void>;
+```
+
+All functions are specified in detail in Sections 11.2.3, 11.3.4 through 11.3.7.
+
+---
+
+### 11.11 Implementation Units for Parallel Coding
+
+#### 11.11.1 Unit Map
+
+```
+Phase 1.1 (types.ts -- add tags field)
+    |
+    +--------+------------------+
+    |        |                  |
+    v        v                  v
+Phase 1.2  Phase 1.3          Phase 2.1 (server.ts -- API endpoints)
+(scan.ts)  (tag.ts)            |
+    |        |                  v
+    v        v             Phase 2.2 (html.ts -- tag display)
+Phase 1.4  Phase 1.5           |
+(cli.ts)   (info.ts)           v
+    |        |             Phase 2.3 (html.ts -- tag filtering)
+    +--------+                  |
+    |                           v
+    |                      Phase 2.4 (html.ts -- tag elimination)
+    |                           |
+    +---------------------------+
+    |
+    v
+Phase 3.1 (test_scripts/test-tags.ts)
+```
+
+#### 11.11.2 Unit Definitions
+
+**Unit N: Type Extension** (`src/types.ts`)
+- **Scope**: Add `tags?: string[]` to `RegistryEntry` interface
+- **Dependencies**: None
+- **Must complete first**: All tag-related units reference the `tags` field
+- **Effort**: Minimal (1 line + 1 JSDoc line)
+- **File conflicts**: Modifies `src/types.ts` -- must be done before other units start
+
+**Unit O: Tag Command Handler** (`src/commands/tag.ts`)
+- **Scope**: New file with `validateTag()`, `tagCommand()`, and all helper functions
+- **Dependencies**: Unit N (for `tags` field on `RegistryEntry`)
+- **Independent of**: Units P, Q (UI units)
+- **File**: New file `src/commands/tag.ts` -- no conflicts with other agents
+- **Testable independently**: Can be tested via CLI invocations once registered
+
+**Unit P: Scan + Info Modifications** (`src/commands/scan.ts`, `src/commands/info.ts`)
+- **Scope**: Add tag preservation in scan, add tag display in info
+- **Dependencies**: Unit N (for `tags` field)
+- **Independent of**: Units O, Q
+- **File conflicts**: Modifies two existing files -- low risk, small changes (1 line in scan, 5 lines in info)
+
+**Unit Q: CLI Registration** (`src/cli.ts`)
+- **Scope**: Import and register `tag` command
+- **Dependencies**: Unit O (for `tagCommand` export)
+- **File conflicts**: Modifies `src/cli.ts` -- small change (import + registration block)
+
+**Unit R: API Endpoints** (`src/ui/server.ts`)
+- **Scope**: Add 4 API endpoints + `parseJsonBody` helper + import `validateTag`
+- **Dependencies**: Units N and O (for types and `validateTag`)
+- **Independent of**: Unit S (UI display can proceed in parallel)
+- **File conflicts**: Modifies `src/ui/server.ts` -- extends the if/else chain
+
+**Unit S: UI Implementation** (`src/ui/html.ts`)
+- **Scope**: Tag badges, filter bar, detail view tag management, elimination dialog
+- **Dependencies**: Unit R (needs API endpoints to be available for fetch calls)
+- **File conflicts**: Modifies `src/ui/html.ts` -- significant additions to CSS, state, and render functions
+
+**Unit T: Tests** (`test_scripts/test-tags.ts`)
+- **Scope**: 21 test cases covering validation, add, remove, list, eliminate, scan preservation, info display
+- **Dependencies**: All other units must be complete
+- **File**: New file -- no conflicts
+
+#### 11.11.3 Parallel Execution Plan
+
+```
+Unit N: types.ts extension (single agent, fast)
+    |
+    +---> Unit O: tag.ts           (Agent 1) ---|
+    |                                          |
+    +---> Unit P: scan.ts + info.ts (Agent 2) -|--- wait for O --->  Unit Q: cli.ts
+    |                                          |
+    +---> Unit R: server.ts        (Agent 3) --|--- wait for R --->  Unit S: html.ts
+                                               |
+                                               +--- wait for all --> Unit T: tests
+```
+
+**Maximum parallelism**: 3 agents (Units O, P, R can run simultaneously after Unit N)
+**Minimum agents needed**: 1 (sequential execution through all units)
+
+#### 11.11.4 Interface Contracts Between Units
+
+| Producer | Consumer | Contract |
+|----------|----------|----------|
+| `types.ts` | All tag modules | `RegistryEntry` has `tags?: string[]` |
+| `tag.ts` | `cli.ts` | `tagCommand(query?: string, options?: TagCmdOptions): Promise<void>` |
+| `tag.ts` | `server.ts` | `validateTag(tag: string): string` (exported for import) |
+| `server.ts` | `html.ts` | `POST /api/tags/add`, `POST /api/tags/remove`, `POST /api/tags/eliminate`, `GET /api/tags` |
+| `registry.ts` | `tag.ts`, `server.ts` | `loadRegistry()`, `saveRegistry()`, `findByPath()`, `searchEntries()` (existing, unchanged) |
+
+---
+
+### 11.12 Files Changed Summary
+
+#### New Files
+
+| File | Unit | Purpose | Est. Lines |
+|------|------|---------|-----------|
+| `src/commands/tag.ts` | O | CLI tag command handler with validation, add, remove, list, eliminate | ~160 |
+| `test_scripts/test-tags.ts` | T | Tag feature test suite (21 tests) | ~300 |
+
+#### Modified Files
+
+| File | Unit | Change | Est. Lines Changed |
+|------|------|--------|-------------------|
+| `src/types.ts` | N | Add `tags?: string[]` to `RegistryEntry` | +2 |
+| `src/commands/scan.ts` | P | Add tag preservation line | +1 |
+| `src/commands/info.ts` | P | Add tags display section | +5 |
+| `src/cli.ts` | Q | Import + register `tag` command | +8 |
+| `src/ui/server.ts` | R | Add 4 API endpoints, `parseJsonBody` helper, import `validateTag` | +100 |
+| `src/ui/html.ts` | S | CSS for tag badges/chips, state extension, filter bar, detail view tags, JS functions | +200 |
+
+#### Unchanged Files
+
+| File | Reason |
+|------|--------|
+| `src/registry.ts` | Handles arbitrary JSON transparently; `tags` field serializes/deserializes without changes |
+| `src/git.ts` | No tag interaction |
+| `src/ai-config.ts` | No tag interaction |
+| `src/ai-client.ts` | No tag interaction |
+| `src/repo-content.ts` | No tag interaction |
+| `src/commands/go.ts` | No tag interaction |
+| `src/commands/search.ts` | No tag interaction (future enhancement) |
+| `src/commands/list.ts` | No tag interaction (could show tag count later) |
+| `src/commands/remove.ts` | Removing an entry removes its tags automatically |
+| `src/commands/init.ts` | Shell function unchanged |
+| `src/commands/describe.ts` | No tag interaction |
+| `src/commands/rename.ts` | No tag interaction |
+| `src/commands/notes.ts` | No tag interaction |
+| `src/commands/remember-claude.ts` | No tag interaction |
+
+---
+
+### 11.13 Verification Criteria
+
+#### After Unit O + P + Q completion (CLI):
+
+1. `npx tsc --noEmit` compiles without errors
+2. `gitter tag my-repo --add backend typescript` adds both tags to the matched repo
+3. `gitter tag my-repo` lists "backend" and "typescript"
+4. `gitter tag my-repo --remove backend` removes only "backend"
+5. `gitter tag --list` shows "typescript" with count 1
+6. `gitter tag --eliminate typescript` (after confirmation) removes from all repos
+7. `gitter info my-repo` shows a Tags line with the remaining tags
+8. Running `gitter scan` inside a tagged repo preserves tags
+9. All 6 existing test suites pass (62+ tests total)
+
+#### After Unit R + S completion (UI):
+
+10. `gitter ui` serves the web page with tag badges on repo cards
+11. Clicking a tag badge in a repo card or filter bar narrows the list to matching repos
+12. Multiple tags can be selected (OR logic: repos matching ANY selected tag are shown)
+13. "Clear" button deselects all tag filters
+14. In the detail view, adding a tag via the input field persists (verified by page reload)
+15. In the detail view, clicking "x" on a tag badge removes it and persists
+16. Clicking "x" on a tag chip in the filter bar triggers elimination with confirmation
+17. After elimination, the tag disappears from all repo cards and the filter bar
+18. API endpoints respond correctly: `GET /api/tags`, `POST /api/tags/add`, `POST /api/tags/remove`, `POST /api/tags/eliminate`
+
+#### After Unit T completion (Tests):
+
+19. `npx tsx test_scripts/test-tags.ts` passes all 21 tests
+20. All 6 existing test suites continue to pass
+
+---
+
+### 11.14 Open Decisions
+
+| # | Decision | Recommendation |
+|---|----------|---------------|
+| 1 | Tag filter logic: OR vs AND when multiple tags selected | Use OR logic (match ANY selected tag) as specified in requirements. AND filtering can be added later via a toggle. |
+| 2 | Show tags in `gitter list` table output | Show tag count in list table (e.g., "3 tags") to avoid width issues. Full tag display in `info` only. Deferred to future enhancement. |
+| 3 | Tag validation utility location | Export `validateTag()` from `src/commands/tag.ts` and import in `server.ts`. Avoids a separate utility file for a trivial function. |
+| 4 | UI tag filter placement | Place tag chips in a collapsible row below the existing filter buttons, to avoid overcrowding the header. |
+| 5 | Tag rename globally | Not included in this feature. Can be added later as `gitter tag --rename old new`. |
+
+---
+
+### 11.15 Risk Assessment
+
+| Risk | Mitigation |
+|------|-----------|
+| Commander variadic option parsing edge cases | Test `--add` with single and multiple tags; verify Commander handles `<tags...>` correctly |
+| Case-insensitive tag matching inconsistency between CLI and UI | Use the same `.toLowerCase()` comparison in both `tag.ts` and server API endpoints |
+| HTML template literal size growth (`html.ts` is already large) | Keep additions modular; use helper functions within the template's JavaScript section |
+| Tag filter interaction with existing filters (search, toggles) | Tag filter composes as AND with other filters (same as existing filter composition pattern) |
+| POST body parsing reliability in Node.js HTTP server | Handle JSON parse errors with try/catch and return 400; `parseJsonBody` helper centralizes parsing |
+| Concurrent registry writes from UI (rapid tag clicks) | Each API endpoint does load-mutate-save atomically; race conditions are unlikely for single-user usage but could theoretically lose writes if two requests overlap. Acceptable for the single-user scenario. |
