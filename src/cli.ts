@@ -88,9 +88,10 @@ program
 
 program
   .command('ui')
-  .description('Open the registry browser in your web browser')
+  .description('Open the registry browser in an Electron window')
   .option('--port <n>', 'Port number for the web server', '3000')
-  .option('--no-open', 'Do not automatically open the browser')
+  .option('--no-open', 'Do not automatically open the window')
+  .option('--browser', 'Open in system browser instead of Electron')
   .action(uiCommand);
 
 program

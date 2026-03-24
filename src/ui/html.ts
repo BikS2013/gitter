@@ -78,15 +78,22 @@ export function getHtmlPage(): string {
   }
 
   #list-panel {
-    width: 30%; min-width: 260px; max-width: 420px;
+    width: 30%; min-width: 200px;
     overflow-y: auto; background: var(--body-bg);
-    border-right: 1px solid var(--border-color);
     padding: 12px;
+    flex-shrink: 0;
   }
+
+  #splitter {
+    width: 5px; cursor: col-resize; background: var(--border-color);
+    flex-shrink: 0; position: relative; z-index: 10;
+    transition: background 0.15s;
+  }
+  #splitter:hover, #splitter.active { background: var(--selected-border); }
 
   #detail-panel {
     flex: 1; overflow-y: auto; padding: 24px 32px;
-    background: #fff;
+    background: #fff; min-width: 300px;
   }
 
   /* --- REPO LIST --- */
@@ -257,7 +264,8 @@ export function getHtmlPage(): string {
   /* --- RESPONSIVE --- */
   @media (max-width: 768px) {
     #main { flex-direction: column; }
-    #list-panel { width: 100%; max-width: none; min-width: 0; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border-color); }
+    #list-panel { width: 100% !important; max-width: none; min-width: 0; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border-color); }
+    #splitter { display: none; }
     #detail-panel { padding: 16px; }
     #header { padding: 0 12px; gap: 8px; height: auto; min-height: 56px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
     #search-box { max-width: none; flex-basis: 100%; order: 10; }
@@ -291,6 +299,7 @@ export function getHtmlPage(): string {
   <div id="list-panel">
     <div class="loading">Loading repositories...</div>
   </div>
+  <div id="splitter"></div>
   <div id="detail-panel">
     <div class="detail-empty">Select a repository from the list</div>
   </div>
@@ -956,6 +965,43 @@ export function getHtmlPage(): string {
       renderList();
     });
   });
+
+  // --- Splitter drag ---
+  (function() {
+    var splitter = document.getElementById('splitter');
+    var listPanel = document.getElementById('list-panel');
+    var main = document.getElementById('main');
+    var dragging = false;
+
+    if (!splitter || !listPanel || !main) return;
+
+    splitter.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      dragging = true;
+      splitter.classList.add('active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      var mainRect = main.getBoundingClientRect();
+      var newWidth = e.clientX - mainRect.left;
+      var minW = 200;
+      var maxW = mainRect.width - 300; // leave at least 300px for detail
+      if (newWidth < minW) newWidth = minW;
+      if (newWidth > maxW) newWidth = maxW;
+      listPanel.style.width = newWidth + 'px';
+    });
+
+    document.addEventListener('mouseup', function() {
+      if (!dragging) return;
+      dragging = false;
+      splitter.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    });
+  })();
 
   // --- Init ---
   fetchRegistry();
