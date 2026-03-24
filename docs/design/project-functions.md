@@ -368,6 +368,113 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 
 ---
 
+### FR-24: User Description Data Model
+
+**Description**: Each `RegistryEntry` gains an optional `userDescription?: string` field for a user-authored free-text description. Unlike the AI-generated `description` (business + technical, populated by the `describe` command), the user description is written entirely by the user. Its purpose is to help users quickly recognize repositories and improve searchability.
+
+**Field Placement**: Top-level on `RegistryEntry` (alongside `notes`, `tags`, etc.), NOT nested inside `RepoDescription`. The AI-generated `RepoDescription` tracks provenance metadata (`generatedAt`, `generatedBy`); the user description does not need such metadata.
+
+**Field Characteristics**:
+- Plain text or markdown string
+- Optional (undefined when not set)
+- No length limit enforced (user discretion)
+- No registry version bump needed (backward-compatible optional field)
+
+---
+
+### FR-25: CLI User Description Management (user-desc command)
+
+**Description**: A CLI command to add, edit, view, or remove the user description on a repository, following the same patterns as the existing `notes` command.
+
+**Command**: `gitter user-desc [query]`
+
+**Options**:
+
+| Invocation | Behavior |
+|-----------|----------|
+| `gitter user-desc [query]` | Opens `$EDITOR` (via `@inquirer/prompts` `editor()`) with the current user description (or empty). Saves on close. Empty content removes the field. |
+| `gitter user-desc [query] --show` | Displays the current user description to stdout without opening the editor. If absent, prints an informational message. |
+| `gitter user-desc [query] --clear` | Prompts for confirmation, then removes the user description from the registry entry. |
+
+**Behavior**:
+- Repository resolution follows the standard `resolveEntry` pattern (query or CWD detection, interactive selection on ambiguity)
+- Editor uses `@inquirer/prompts` `editor()` with `output: process.stderr` and `postfix: '.md'`
+- Registry mutations use load -> find -> mutate directly -> save (atomic) pattern
+- Interactive output goes to stderr; `--show` output goes to stdout
+
+---
+
+### FR-26: User Description Preservation in Scan
+
+**Description**: When `gitter scan` re-scans and updates a repository entry, the existing `userDescription` must be carried over to the updated entry. This is consistent with how `description`, `notes`, `claudeSessions`, and `tags` are preserved.
+
+**Command**: `gitter scan` (existing command, extended)
+
+---
+
+### FR-27: User Description Display in Info Command
+
+**Description**: The `gitter info <query>` command displays the repository's user description when present, positioned **above** the existing AI-generated description section.
+
+**Command**: `gitter info <query>` (existing command, extended)
+
+**Display Order**:
+1. Repository metadata (name, path, remotes, branches, current branch, last updated)
+2. **User Description** section (new)
+3. Description section (business + technical, existing)
+4. Tags section (existing)
+5. Claude Sessions section (existing)
+6. Notes section (existing)
+
+**Format**:
+- When present: header `--- User Description ---` followed by the text
+- When absent: `User Description: (none -- run 'gitter user-desc' to add)`
+
+---
+
+### FR-28: User Description Searchability
+
+**Description**: The `searchEntries` function in `src/registry.ts` includes `userDescription` in its case-insensitive partial match, so that `gitter search <term>` matches against user description content.
+
+**Command**: `gitter search <query>` (existing command, extended behavior)
+
+---
+
+### FR-29: User Description in Web UI
+
+**Description**: The web UI displays the user description in the detail panel above the business description section, and provides edit capability.
+
+**Display Behavior**:
+- When present, display under a "User Description" heading above the business description
+- When absent, show no placeholder (to avoid clutter in the card view)
+
+**Edit Behavior**:
+- Textarea pre-populated with current user description (or empty)
+- Save button sends `POST /api/user-desc`
+- Clear button (visible when description exists) sends `DELETE /api/user-desc`
+- Changes persist immediately and refresh the detail view
+
+---
+
+### FR-30: User Description API Endpoints
+
+**Description**: The HTTP server exposes REST endpoints to support user description mutations from the web UI.
+
+**Endpoints**:
+
+| Endpoint | Method | Request Body | Response |
+|---------|--------|-------------|----------|
+| `POST /api/user-desc` | POST | `{ localPath: string, userDescription: string }` | `{ success: true }` |
+| `DELETE /api/user-desc` | DELETE | `{ localPath: string }` | `{ success: true }` |
+
+**Behavior**:
+- Follows existing Node.js built-in HTTP server pattern (no Express)
+- POST body parsed manually from request stream using existing `parseJsonBody` helper
+- Error responses: 400 for invalid input, 404 for entry not found, 500 for server errors
+- Empty string in POST body removes the field (same as DELETE)
+
+---
+
 ## Feature Summary Table
 
 | Feature | Command | Status |
@@ -396,6 +503,13 @@ Gitter is a TypeScript CLI tool that maintains a persistent registry of local gi
 | Web UI Tag Filtering | (web UI) | Planned |
 | Web UI Tag Elimination | (web UI) | Planned |
 | Tag API Endpoints | (HTTP server) | Planned |
+| User Description Data Model | (internal) | Planned |
+| CLI User Description Management | `gitter user-desc [query]` | Planned |
+| User Description Preservation in Scan | `gitter scan` (extended) | Planned |
+| User Description Display in Info | `gitter info` (extended) | Planned |
+| User Description Searchability | `gitter search` (extended) | Planned |
+| User Description in Web UI | (web UI) | Planned |
+| User Description API Endpoints | (HTTP server) | Planned |
 
 ---
 

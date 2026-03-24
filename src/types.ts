@@ -33,6 +33,8 @@ export interface RegistryEntry {
   description?: RepoDescription;
   /** User notes in markdown format (optional, populated by notes command) */
   notes?: string;
+  /** User-written description for easy recognition and search */
+  userDescription?: string;
   /** Saved Claude Code session IDs for this repository */
   claudeSessions?: ClaudeSession[];
   /** User-defined tags for categorizing/filtering repositories */

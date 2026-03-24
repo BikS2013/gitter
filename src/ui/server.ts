@@ -143,6 +143,69 @@ export function startServer(port: number): void {
         res.end(JSON.stringify({ error: 'Invalid request body' }));
       }
 
+    } else if (req.url === '/api/user-desc' && req.method === 'POST') {
+      // POST /api/user-desc - Set user description for a repo
+      try {
+        const body = await parseJsonBody(req) as { localPath?: string; userDescription?: string };
+
+        if (!body.localPath || typeof body.userDescription !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing localPath or userDescription string' }));
+          return;
+        }
+
+        const registry = loadRegistry();
+        const entry = findByPath(registry, body.localPath);
+        if (!entry) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Repository not found' }));
+          return;
+        }
+
+        const trimmed = body.userDescription.trim();
+        if (trimmed) {
+          entry.userDescription = trimmed;
+        } else {
+          delete entry.userDescription;
+        }
+        saveRegistry(registry);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, entry }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid request body' }));
+      }
+
+    } else if (req.url === '/api/user-desc' && req.method === 'DELETE') {
+      // DELETE /api/user-desc - Clear user description for a repo
+      try {
+        const body = await parseJsonBody(req) as { localPath?: string };
+
+        if (!body.localPath) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing localPath' }));
+          return;
+        }
+
+        const registry = loadRegistry();
+        const entry = findByPath(registry, body.localPath);
+        if (!entry) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Repository not found' }));
+          return;
+        }
+
+        delete entry.userDescription;
+        saveRegistry(registry);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, entry }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid request body' }));
+      }
+
     } else if (req.url === '/api/tags/eliminate' && req.method === 'POST') {
       // POST /api/tags/eliminate - Remove a tag from ALL repos
       try {

@@ -130,6 +130,7 @@ export function searchEntries(registry: Registry, query: string): RegistryEntry[
   return registry.repositories.filter(entry => {
     if (entry.repoName.toLowerCase().includes(q)) return true;
     if (entry.localPath.toLowerCase().includes(q)) return true;
+    if (entry.userDescription && entry.userDescription.toLowerCase().includes(q)) return true;
     for (const remote of entry.remotes) {
       if (remote.fetchUrl.toLowerCase().includes(q)) return true;
       if (remote.pushUrl.toLowerCase().includes(q)) return true;

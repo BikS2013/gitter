@@ -14,6 +14,7 @@ import { notesCommand } from './commands/notes.js';
 import { uiCommand } from './commands/ui.js';
 import { rememberClaudeCommand } from './commands/remember-claude.js';
 import { tagCommand } from './commands/tag.js';
+import { userDescCommand } from './commands/user-desc.js';
 import { isInsideGitRepo } from './git.js';
 
 process.on('uncaughtException', (error: Error) => {
@@ -34,6 +35,9 @@ program
 program
   .command('list')
   .description('List all registered repositories')
+  .option('--tag <tags...>', 'Filter by tag (show repos with any matching tag)')
+  .option('--name <query>', 'Filter by repo name (substring match)')
+  .option('--desc <query>', 'Filter by user description (substring match)')
   .action(listCommand);
 
 program
@@ -95,6 +99,13 @@ program
   .option('--list', 'List all stored Claude sessions')
   .option('--clear', 'Remove all stored Claude sessions')
   .action(rememberClaudeCommand);
+
+program
+  .command('user-desc [query]')
+  .description('Add, edit, or view user description for a repository')
+  .option('--show', 'Show stored user description only')
+  .option('--clear', 'Remove user description')
+  .action(userDescCommand);
 
 program
   .command('tag [query]')

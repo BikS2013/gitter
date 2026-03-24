@@ -239,6 +239,17 @@ export function getHtmlPage(): string {
     font-size: 0.8rem; background: var(--tag-bg); color: var(--tag-text);
   }
 
+  /* --- USER DESCRIPTION --- */
+  .user-desc-display { font-size: 14px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; }
+  .user-desc-edit { width: 100%; min-height: 80px; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; font-family: var(--sans-font); font-size: 13px; resize: vertical; }
+  .user-desc-actions { display: flex; gap: 6px; margin-top: 8px; }
+  .user-desc-save { padding: 4px 12px; background: #2e7d32; color: #fff; border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
+  .user-desc-save:hover { background: #1b5e20; }
+  .user-desc-clear { padding: 4px 12px; background: #c62828; color: #fff; border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
+  .user-desc-clear:hover { background: #b71c1c; }
+  .user-desc-edit-btn { padding: 4px 12px; background: var(--tag-text); color: #fff; border: none; border-radius: 4px; font-size: 12px; cursor: pointer; }
+  .user-desc-edit-btn:hover { background: #3a5f95; }
+
   /* Loading & Error */
   .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 16px; }
   .error-msg { color: #c0392b; background: #fdecea; padding: 12px 16px; border-radius: 6px; font-size: 14px; }
@@ -498,6 +509,7 @@ export function getHtmlPage(): string {
       list = list.filter(function(r) {
         if (r.repoName.toLowerCase().includes(q)) return true;
         if (r.localPath.toLowerCase().includes(q)) return true;
+        if (r.userDescription && r.userDescription.toLowerCase().includes(q)) return true;
         if (r.remotes && r.remotes.some(function(rem) {
           return rem.fetchUrl.toLowerCase().includes(q) || rem.pushUrl.toLowerCase().includes(q);
         })) return true;
@@ -576,6 +588,7 @@ export function getHtmlPage(): string {
       html += '<div class="repo-meta">';
       html += '<span class="branch-tag">' + escapeHtml(repo.currentBranch) + '</span>';
       if (hasDesc) html += '<span class="desc-indicator">&#9679; described</span>';
+      if (repo.userDescription) html += '<span class="desc-indicator">&#9679; user desc</span>';
       if (hasNotes) html += '<span class="desc-indicator">&#9679; notes</span>';
       if (repo.tags && repo.tags.length > 0) {
         repo.tags.forEach(function(t) {
@@ -688,6 +701,31 @@ export function getHtmlPage(): string {
     html += '<span class="detail-timestamp">' + formatTimestamp(repo.lastUpdated) + '</span>';
     html += '</div>';
 
+    // User Description (above business description)
+    html += '<div class="detail-section">';
+    html += '<h2>User Description</h2>';
+    if (repo.userDescription) {
+      html += '<div class="user-desc-display" id="user-desc-text">' + escapeHtml(repo.userDescription) + '</div>';
+      html += '<div class="user-desc-actions">';
+      html += '<button class="user-desc-edit-btn" id="edit-user-desc-btn">Edit</button>';
+      html += '<button class="user-desc-clear" id="clear-user-desc-btn">Clear</button>';
+      html += '</div>';
+    } else {
+      html += '<p class="muted">(No user description)</p>';
+      html += '<div class="user-desc-actions">';
+      html += '<button class="user-desc-edit-btn" id="edit-user-desc-btn">Add Description</button>';
+      html += '</div>';
+    }
+    // Hidden edit form
+    html += '<div id="user-desc-edit-form" style="display:none; margin-top:8px;">';
+    html += '<textarea class="user-desc-edit" id="user-desc-textarea"></textarea>';
+    html += '<div class="user-desc-actions">';
+    html += '<button class="user-desc-save" id="save-user-desc-btn">Save</button>';
+    html += '<button class="user-desc-edit-btn" id="cancel-user-desc-btn">Cancel</button>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+
     // Business Description
     html += '<div class="detail-section">';
     html += '<h2>Business Description</h2>';
@@ -789,6 +827,64 @@ export function getHtmlPage(): string {
         if (tag) removeTagFromRepo(repo.localPath, tag);
       });
     });
+
+    // User description handlers
+    var editUserDescBtn = document.getElementById('edit-user-desc-btn');
+    var saveUserDescBtn = document.getElementById('save-user-desc-btn');
+    var cancelUserDescBtn = document.getElementById('cancel-user-desc-btn');
+    var clearUserDescBtn = document.getElementById('clear-user-desc-btn');
+    var userDescEditForm = document.getElementById('user-desc-edit-form');
+    var userDescTextarea = document.getElementById('user-desc-textarea');
+    var userDescText = document.getElementById('user-desc-text');
+
+    if (editUserDescBtn) {
+      editUserDescBtn.addEventListener('click', function() {
+        userDescTextarea.value = repo.userDescription || '';
+        userDescEditForm.style.display = 'block';
+        if (userDescText) userDescText.style.display = 'none';
+        editUserDescBtn.style.display = 'none';
+        if (clearUserDescBtn) clearUserDescBtn.style.display = 'none';
+      });
+    }
+
+    if (saveUserDescBtn) {
+      saveUserDescBtn.addEventListener('click', function() {
+        var desc = userDescTextarea.value;
+        apiCall('/api/user-desc', { localPath: repo.localPath, userDescription: desc })
+          .then(function() {
+            refreshAfterTagChange(repo.localPath);
+          })
+          .catch(function(err) { alert(err.message); });
+      });
+    }
+
+    if (cancelUserDescBtn) {
+      cancelUserDescBtn.addEventListener('click', function() {
+        userDescEditForm.style.display = 'none';
+        if (userDescText) userDescText.style.display = 'block';
+        if (editUserDescBtn) editUserDescBtn.style.display = 'inline-block';
+        if (clearUserDescBtn) clearUserDescBtn.style.display = 'inline-block';
+      });
+    }
+
+    if (clearUserDescBtn) {
+      clearUserDescBtn.addEventListener('click', function() {
+        if (!confirm('Clear user description for this repository?')) return;
+        fetch('/api/user-desc', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ localPath: repo.localPath })
+        })
+          .then(function(res) {
+            if (!res.ok) return res.json().then(function(e) { throw new Error(e.error || 'Request failed'); });
+            return res.json();
+          })
+          .then(function() {
+            refreshAfterTagChange(repo.localPath);
+          })
+          .catch(function(err) { alert(err.message); });
+      });
+    }
   }
 
   function formatTimestamp(iso) {

@@ -38,6 +38,9 @@ export async function scanCommand(): Promise<void> {
   if (existing?.tags) {
     metadata.tags = existing.tags;
   }
+  if (existing?.userDescription) {
+    metadata.userDescription = existing.userDescription;
+  }
 
   addOrUpdate(registry, metadata);
   saveRegistry(registry);

@@ -89,6 +89,15 @@ export async function infoCommand(query: string): Promise<void> {
   // Last Updated
   console.log(`${pc.bold('Last Updated:')}     ${entry.lastUpdated}`);
 
+  // User Description section
+  console.log();
+  if (entry.userDescription) {
+    console.log(pc.bold('--- User Description ---'));
+    console.log(entry.userDescription);
+  } else {
+    console.log(`${pc.bold('User Description:')} (none -- run 'gitter user-desc' to add)`);
+  }
+
   // Description section
   console.log();
   if (entry.description) {

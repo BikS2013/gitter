@@ -4000,3 +4000,294 @@ Unit N: types.ts extension (single agent, fast)
 | Tag filter interaction with existing filters (search, toggles) | Tag filter composes as AND with other filters (same as existing filter composition pattern) |
 | POST body parsing reliability in Node.js HTTP server | Handle JSON parse errors with try/catch and return 400; `parseJsonBody` helper centralizes parsing |
 | Concurrent registry writes from UI (rapid tag clicks) | Each API endpoint does load-mutate-save atomically; race conditions are unlikely for single-user usage but could theoretically lose writes if two requests overlap. Acceptable for the single-user scenario. |
+
+---
+
+## 12. User Description Feature
+
+### 12.1 Feature Overview
+
+The `gitter user-desc` command allows users to attach a free-text description to any registered repository. Unlike the AI-generated `description` (business + technical, populated by the `describe` command), the user description is authored entirely by the user. Its purpose is to help users quickly recognize repositories and improve searchability across the registry.
+
+The feature follows the same patterns established by the `notes` command: editor-based input, `--show` and `--clear` options, scan preservation, and direct registry mutation.
+
+**Reference Documents**:
+- Requirements: `docs/reference/refined-request-user-description.md`
+- Implementation Plan: `docs/design/plan-005-user-description.md`
+
+---
+
+### 12.2 Data Model
+
+#### 12.2.1 RegistryEntry Extension
+
+The `RegistryEntry` interface in `src/types.ts` is extended with an optional `userDescription` field. The registry schema version remains `1` since the new field is optional and fully backward-compatible.
+
+```typescript
+export interface RegistryEntry {
+  // ... all existing fields unchanged ...
+
+  /** User-authored description for recognition and search */
+  userDescription?: string;
+}
+```
+
+**Field Placement**: Top-level on `RegistryEntry`, NOT nested inside `RepoDescription`. The AI-generated `RepoDescription` carries provenance metadata (`generatedAt`, `generatedBy`). The user description is user-authored and does not need such metadata.
+
+**Impact on Existing Code**:
+- `loadRegistry()` and `saveRegistry()` require no changes -- they serialize/deserialize the full object graph via `JSON.parse`/`JSON.stringify`.
+- `addOrUpdate()` replaces the full entry by `localPath`. Since `collectRepoMetadata()` does not produce a `userDescription` field, re-scanning would lose it. This is mitigated in `scan.ts` (see Section 12.5).
+- No registry version bump is needed since the field is optional.
+
+---
+
+### 12.3 Module Design: `src/commands/user-desc.ts`
+
+**Purpose**: Command handler for `gitter user-desc [query]` -- add, edit, view, or remove a user-authored description on a repository.
+
+**Pattern**: Follows `src/commands/notes.ts` exactly.
+
+#### Interface and Options
+
+```typescript
+interface UserDescCmdOptions {
+  show?: boolean;
+  clear?: boolean;
+}
+
+export async function userDescCommand(
+  query: string | undefined,
+  options: UserDescCmdOptions
+): Promise<void>;
+```
+
+#### resolveEntry Helper
+
+Copied from `notes.ts` (same logic):
+1. If `query` provided: search registry, handle 0/1/N matches (interactive select on N).
+2. If no query: check if CWD is inside a registered git repo, return that entry.
+3. Errors: no match -> stderr + exit(1), not in repo -> stderr + exit(1), not registered -> stderr + exit(1).
+
+#### Command Logic
+
+```
+userDescCommand(query, options):
+    entry = resolveEntry(query)
+
+    if options.show:
+        if entry.userDescription:
+            console.log(entry.userDescription)
+        else:
+            console.log("No user description set for <repoName>. Run 'gitter user-desc' to add one.")
+        return
+
+    if options.clear:
+        if !entry.userDescription:
+            console.log("No user description to clear for <repoName>.")
+            return
+        confirmed = await confirm("Clear user description for <repoName>?", { output: stderr })
+        if !confirmed:
+            console.log("Cancelled.")
+            return
+        registry = loadRegistry()
+        registryEntry = findByPath(registry, entry.localPath)
+        delete registryEntry.userDescription
+        saveRegistry(registry)
+        console.log("User description cleared for <repoName>.")
+        return
+
+    // Default: open editor
+    updatedDesc = await editor({
+        message: "Edit user description for <repoName> (save and close editor when done):",
+        default: entry.userDescription ?? '',
+        postfix: '.md',
+    })
+
+    trimmed = updatedDesc.trim()
+    registry = loadRegistry()
+    registryEntry = findByPath(registry, entry.localPath)
+    if trimmed:
+        registryEntry.userDescription = trimmed
+    else:
+        delete registryEntry.userDescription
+    saveRegistry(registry)
+
+    if trimmed:
+        console.log("User description saved for <repoName>.")
+    else:
+        console.log("User description cleared for <repoName>.")
+```
+
+---
+
+### 12.4 CLI Registration (`src/cli.ts`)
+
+```typescript
+import { userDescCommand } from './commands/user-desc.js';
+
+program
+  .command('user-desc [query]')
+  .description('Add, edit, or view user description for a repository')
+  .option('--show', 'Display stored user description without opening editor')
+  .option('--clear', 'Remove user description')
+  .action(userDescCommand);
+```
+
+---
+
+### 12.5 Scan Preservation (`src/commands/scan.ts`)
+
+In the scan command, preserve `userDescription` from the existing entry when re-scanning:
+
+```typescript
+if (existing?.userDescription) {
+  metadata.userDescription = existing.userDescription;
+}
+```
+
+This follows the identical pattern used for `description`, `notes`, `claudeSessions`, and `tags`.
+
+---
+
+### 12.6 Info Display (`src/commands/info.ts`)
+
+A new "User Description" section is inserted **above** the existing "Description" section. The full display order becomes:
+
+1. Repository metadata (name, path, remotes, branches, current branch, last updated)
+2. **User Description** (new)
+3. Description (business + technical)
+4. Tags
+5. Claude Sessions
+6. Notes
+
+```typescript
+// User Description section (inserted before existing Description section)
+console.log();
+if (entry.userDescription) {
+  console.log(pc.bold('--- User Description ---'));
+  console.log(entry.userDescription);
+} else {
+  console.log(`${pc.bold('User Description:')} (none -- run 'gitter user-desc' to add)`);
+}
+```
+
+---
+
+### 12.7 Search Extension (`src/registry.ts`)
+
+Extend `searchEntries()` to include `userDescription` in the case-insensitive partial match:
+
+```typescript
+export function searchEntries(registry: Registry, query: string): RegistryEntry[] {
+  const q = query.toLowerCase();
+  return registry.repositories.filter(entry => {
+    if (entry.repoName.toLowerCase().includes(q)) return true;
+    if (entry.localPath.toLowerCase().includes(q)) return true;
+    // NEW: match against user description
+    if (entry.userDescription?.toLowerCase().includes(q)) return true;
+    for (const remote of entry.remotes) {
+      if (remote.fetchUrl.toLowerCase().includes(q)) return true;
+      if (remote.pushUrl.toLowerCase().includes(q)) return true;
+    }
+    return false;
+  });
+}
+```
+
+---
+
+### 12.8 Web UI
+
+#### 12.8.1 API Endpoints (`src/ui/server.ts`)
+
+Two new endpoints following the existing pattern:
+
+| Endpoint | Method | Request Body | Response |
+|---------|--------|-------------|----------|
+| `POST /api/user-desc` | POST | `{ localPath: string, userDescription: string }` | `{ success: true }` |
+| `DELETE /api/user-desc` | DELETE | `{ localPath: string }` | `{ success: true }` |
+
+Implementation:
+
+```typescript
+// POST /api/user-desc
+if (req.method === 'POST' && url === '/api/user-desc') {
+  const body = await parseJsonBody(req);
+  const { localPath, userDescription } = body;
+  if (!localPath) return sendJson(res, 400, { error: 'localPath is required' });
+
+  const registry = loadRegistry();
+  const entry = findByPath(registry, localPath);
+  if (!entry) return sendJson(res, 404, { error: 'Repository not found' });
+
+  if (userDescription && userDescription.trim()) {
+    entry.userDescription = userDescription.trim();
+  } else {
+    delete entry.userDescription;
+  }
+  saveRegistry(registry);
+  return sendJson(res, 200, { success: true });
+}
+
+// DELETE /api/user-desc
+if (req.method === 'DELETE' && url === '/api/user-desc') {
+  const body = await parseJsonBody(req);
+  const { localPath } = body;
+  if (!localPath) return sendJson(res, 400, { error: 'localPath is required' });
+
+  const registry = loadRegistry();
+  const entry = findByPath(registry, localPath);
+  if (!entry) return sendJson(res, 404, { error: 'Repository not found' });
+
+  delete entry.userDescription;
+  saveRegistry(registry);
+  return sendJson(res, 200, { success: true });
+}
+```
+
+#### 12.8.2 Detail View (`src/ui/html.ts`)
+
+In the detail panel rendering, the user description is displayed **above** the business description:
+
+1. **Display**: When `userDescription` is present, render it under a "User Description" heading. When absent, show no placeholder.
+2. **Edit**: Textarea pre-populated with current value. "Save" button sends POST, "Clear" button sends DELETE. After mutation, refresh the detail view.
+
+The user description section is placed in the HTML between the repository metadata and the AI-generated description, matching the CLI display order.
+
+---
+
+### 12.9 Updated File Structure
+
+```
+src/
+|-- commands/
+|   |-- user-desc.ts           # gitter user-desc [query] (new)
+|   |-- ... (existing files)
+```
+
+No new modules are needed. The feature adds one new command handler file and modifies five existing files.
+
+---
+
+### 12.10 Relationship to Existing Features
+
+| Feature | Field | Purpose | Author |
+|---------|-------|---------|--------|
+| `user-desc` | `userDescription` | Concise recognition text, searchable | User |
+| `notes` | `notes` | Private working notes, not searchable | User |
+| `describe` | `description` | Structured business + technical analysis | AI |
+
+The three text fields serve distinct purposes:
+- **User Description**: A brief, user-written summary for quick identification and search. Displayed prominently in info and UI.
+- **Notes**: Extended working notes for the user's own reference. Not included in search results.
+- **Description**: AI-generated structured analysis with provenance metadata. Populated by the `describe` command.
+
+---
+
+### 12.11 Implementation Units
+
+| Unit | Files | Dependencies | Effort |
+|------|-------|-------------|--------|
+| A: Data Model + CLI | `types.ts`, `user-desc.ts` (new), `cli.ts`, `scan.ts`, `info.ts`, `registry.ts` | None (foundation) | ~150 lines new + ~30 lines modified |
+| B: Web UI | `html.ts`, `server.ts` | Unit A | ~80 lines modified |
+| C: Tests | `test_scripts/test-user-desc.ts` (new) | Units A, B | ~120 lines new |
