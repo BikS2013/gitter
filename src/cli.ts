@@ -73,6 +73,7 @@ program
   .option('--edit', 'Edit description manually in your editor')
   .option('--business-lines <n>', 'Target line count for business description', '20')
   .option('--technical-lines <n>', 'Target line count for technical description', '20')
+  .option('--tag <tag>', 'Describe the relationship between all repos with this tag')
   .action(describeCommand);
 
 program
@@ -113,6 +114,7 @@ program
   .description('Manage tags for a repository')
   .option('--add <tags...>', 'Add tags to the repository')
   .option('--remove <tags...>', 'Remove tags from the repository')
+  .option('--clear', 'Remove all tags from the repository')
   .option('--list', 'List all tags used across all repositories')
   .option('--eliminate <tag>', 'Remove a tag from all repositories')
   .action(tagCommand);

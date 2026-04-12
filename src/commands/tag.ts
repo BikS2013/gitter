@@ -1,14 +1,30 @@
-import { select, confirm } from '@inquirer/prompts';
+import { select, confirm, search } from '@inquirer/prompts';
 import pc from 'picocolors';
 import { loadRegistry, saveRegistry, findByPath, searchEntries } from '../registry.js';
 import { isInsideGitRepo, getRepoRoot } from '../git.js';
-import type { RegistryEntry } from '../types.js';
+import type { Registry, RegistryEntry } from '../types.js';
 
 interface TagCmdOptions {
   add?: string[];
   remove?: string[];
+  clear?: boolean;
   list?: boolean;
   eliminate?: string;
+}
+
+/**
+ * Collect all unique tags across all repos, sorted alphabetically.
+ */
+function collectAllTags(registry: Registry): string[] {
+  const tagSet = new Set<string>();
+  for (const entry of registry.repositories) {
+    if (entry.tags) {
+      for (const tag of entry.tags) {
+        tagSet.add(tag);
+      }
+    }
+  }
+  return [...tagSet].sort();
 }
 
 /**
@@ -155,6 +171,29 @@ export async function tagCommand(query: string | undefined, options: TagCmdOptio
     return;
   }
 
+  // --clear: remove ALL tags from a repo
+  if (options.clear) {
+    const entry = await resolveEntry(query);
+    const registry = loadRegistry();
+    const registryEntry = findByPath(registry, entry.localPath);
+    if (!registryEntry) return;
+    if (!registryEntry.tags?.length) {
+      console.log(`No tags to clear for ${entry.repoName}.`);
+      return;
+    }
+    const yes = await confirm({
+      message: `Clear all tags for ${entry.repoName}?`,
+    }, { output: process.stderr });
+    if (!yes) {
+      console.log('Cancelled.');
+      return;
+    }
+    delete registryEntry.tags;
+    saveRegistry(registry);
+    console.log(`Tags cleared for ${pc.bold(entry.repoName)}.`);
+    return;
+  }
+
   // --add and --remove require resolving a repo
   if (options.add || options.remove) {
     const entry = await resolveEntry(query);
@@ -189,11 +228,81 @@ export async function tagCommand(query: string | undefined, options: TagCmdOptio
     return;
   }
 
-  // No options: show current tags for the resolved repo
+  // No options: interactive tag search mode
   const entry = await resolveEntry(query);
-  if (entry.tags && entry.tags.length > 0) {
-    console.log(`${pc.bold('Tags for ' + entry.repoName + ':')} ${entry.tags.map(t => pc.cyan(t)).join(', ')}`);
+  const registry = loadRegistry();
+  const registryEntry = findByPath(registry, entry.localPath);
+  if (!registryEntry) return;
+
+  const currentTags = new Set(registryEntry.tags ?? []);
+
+  if (currentTags.size > 0) {
+    console.log(`Current tags: ${[...currentTags].sort().map(t => pc.cyan(t)).join(', ')}`);
+  }
+
+  // Interactive loop: search existing tags or create new ones
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const allTags = collectAllTags(registry);
+    const availableTags = allTags.filter(t => !currentTags.has(t));
+
+    const ac = new AbortController();
+    const onKeypress = (_ch: string, key: { name: string }) => {
+      if (key?.name === 'escape') ac.abort();
+    };
+    process.stdin.on('keypress', onKeypress);
+
+    let tag: string;
+    try {
+      tag = await search({
+        message: 'Add a tag (Esc to finish):',
+        source: async (term) => {
+          const q = (term ?? '').trim().toLowerCase();
+
+          if (!q) {
+            return availableTags.map(t => ({ name: t, value: t }));
+          }
+
+          const matches = availableTags.filter(t => t.includes(q));
+          const isNew = !allTags.includes(q) && !currentTags.has(q);
+
+          const choices: Array<{ name: string; value: string }> = [];
+          if (isNew) {
+            choices.push({ name: `+ "${q}"`, value: q });
+          }
+          for (const t of matches) {
+            choices.push({ name: t, value: t });
+          }
+
+          return choices;
+        },
+      }, { output: process.stderr, signal: ac.signal });
+    } catch {
+      break; // Escape pressed
+    } finally {
+      process.stdin.removeListener('keypress', onKeypress);
+    }
+
+    try {
+      const validated = validateTag(tag);
+      currentTags.add(validated);
+      console.log(`  + ${pc.cyan(validated)}`);
+    } catch (err) {
+      console.log(`  ${pc.red((err as Error).message)}`);
+    }
+  }
+
+  const finalTags = [...currentTags].sort();
+  if (finalTags.length === 0) {
+    delete registryEntry.tags;
   } else {
-    console.log(`No tags for ${pc.bold(entry.repoName)}. Use ${pc.dim('gitter tag --add <tag>')} to add tags.`);
+    registryEntry.tags = finalTags;
+  }
+  saveRegistry(registry);
+
+  if (finalTags.length > 0) {
+    console.log(`Tags for ${pc.bold(entry.repoName)}: ${finalTags.map(t => pc.cyan(t)).join(', ')}`);
+  } else {
+    console.log(`All tags removed from ${pc.bold(entry.repoName)}.`);
   }
 }
