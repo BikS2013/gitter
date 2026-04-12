@@ -966,14 +966,26 @@ export function getHtmlPage(): string {
     });
   });
 
-  // --- Splitter drag ---
+  // --- Splitter drag with localStorage persistence ---
   (function() {
     var splitter = document.getElementById('splitter');
     var listPanel = document.getElementById('list-panel');
     var main = document.getElementById('main');
     var dragging = false;
+    var STORAGE_KEY = 'gitter-splitter-width';
 
     if (!splitter || !listPanel || !main) return;
+
+    // Restore saved splitter width
+    try {
+      var savedWidth = localStorage.getItem(STORAGE_KEY);
+      if (savedWidth) {
+        var w = parseInt(savedWidth, 10);
+        if (w >= 200) {
+          listPanel.style.width = w + 'px';
+        }
+      }
+    } catch(e) { /* localStorage unavailable */ }
 
     splitter.addEventListener('mousedown', function(e) {
       e.preventDefault();
@@ -988,7 +1000,7 @@ export function getHtmlPage(): string {
       var mainRect = main.getBoundingClientRect();
       var newWidth = e.clientX - mainRect.left;
       var minW = 200;
-      var maxW = mainRect.width - 300; // leave at least 300px for detail
+      var maxW = mainRect.width - 300;
       if (newWidth < minW) newWidth = minW;
       if (newWidth > maxW) newWidth = maxW;
       listPanel.style.width = newWidth + 'px';
@@ -1000,6 +1012,10 @@ export function getHtmlPage(): string {
       splitter.classList.remove('active');
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      // Save splitter width
+      try {
+        localStorage.setItem(STORAGE_KEY, listPanel.offsetWidth.toString());
+      } catch(e) { /* localStorage unavailable */ }
     });
   })();
 

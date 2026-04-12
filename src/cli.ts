@@ -51,12 +51,12 @@ program
   .action(goCommand);
 
 program
-  .command('info <query>')
+  .command('info [query]')
   .description('Show detailed information about a repository')
   .action(infoCommand);
 
 program
-  .command('remove <query>')
+  .command('remove [query]')
   .description('Remove a repository from the registry')
   .action(removeCommand);
 
@@ -76,7 +76,7 @@ program
   .action(describeCommand);
 
 program
-  .command('rename <query> <new-name>')
+  .command('rename [query] <new-name>')
   .description('Rename a repository in the registry')
   .action(renameCommand);
 

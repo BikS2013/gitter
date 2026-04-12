@@ -1,43 +1,53 @@
 import { existsSync } from 'fs';
 import pc from 'picocolors';
 import { select } from '@inquirer/prompts';
-import { loadRegistry, searchEntries } from '../registry.js';
+import { loadRegistry, searchEntries, findByPath } from '../registry.js';
+import { isInsideGitRepo, getRepoRoot } from '../git.js';
 import type { RegistryEntry } from '../types.js';
 
 /**
- * Handler for `gitter info <query>` command.
- *
- * Behavior:
- * 1. Load registry, search for matches
- * 2. If 0 matches -> stderr error + exit(1)
- * 3. If N matches -> interactive select (prompts to stderr)
- * 4. Display full metadata for the selected entry
+ * Resolve target entry from query or CWD.
  */
-export async function infoCommand(query: string): Promise<void> {
+async function resolveEntry(query: string | undefined): Promise<RegistryEntry> {
   const registry = loadRegistry();
-  const matches = searchEntries(registry, query);
 
-  if (matches.length === 0) {
-    process.stderr.write(`No repositories match query: ${query}\n`);
-    process.exit(1);
-  }
-
-  let entry: RegistryEntry;
-
-  if (matches.length === 1) {
-    entry = matches[0];
-  } else {
-    entry = await select<RegistryEntry>({
+  if (query) {
+    const matches = searchEntries(registry, query);
+    if (matches.length === 0) {
+      process.stderr.write(`No repositories match query: ${query}\n`);
+      process.exit(1);
+    }
+    if (matches.length === 1) return matches[0];
+    return await select<RegistryEntry>({
       message: 'Multiple repositories matched. Select one:',
       choices: matches.map(e => ({
         name: `${e.repoName} (${e.localPath})`,
         value: e,
         description: `Last updated: ${e.lastUpdated}`,
       })),
-    }, {
-      output: process.stderr,
-    });
+    }, { output: process.stderr });
   }
+
+  if (!isInsideGitRepo()) {
+    process.stderr.write('Not inside a git repository. Provide a query or run from within a registered repo.\n');
+    process.exit(1);
+  }
+
+  const repoRoot = getRepoRoot();
+  const entry = findByPath(registry, repoRoot);
+  if (!entry) {
+    process.stderr.write('Current repository is not registered. Run \'gitter scan\' first.\n');
+    process.exit(1);
+  }
+  return entry;
+}
+
+/**
+ * Handler for `gitter info [query]` command.
+ * If no query is provided and CWD is inside a registered repo, uses that repo.
+ */
+export async function infoCommand(query: string | undefined): Promise<void> {
+  const entry = await resolveEntry(query);
 
   const pathExists = existsSync(entry.localPath);
   const pathDisplay = pathExists
